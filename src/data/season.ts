@@ -51,6 +51,11 @@ export const seasonRaceSessions = (year: number) =>
   cached<Session>("sessions", { year, session_name: "Race" }, () =>
     getOpenF1<Session>("sessions", { year, session_name: "Race" }));
 
+// Sprint sessions (6 per season) — points-scoring, separate from seasonRaceSessions.
+export const seasonSprintSessions = (year: number) =>
+  cached<Session>("sessions", { year, session_name: "Sprint" }, () =>
+    getOpenF1<Session>("sessions", { year, session_name: "Sprint" }));
+
 export interface SeasonPoint {
   meetingKey: number;
   meetingName: string;
@@ -81,16 +86,19 @@ export interface SeasonStats {
 export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<{ meetings: Meeting[]; stats: SeasonStats }> => {
   const m = meetings ?? await seasonMeetings(year);
   const races = await seasonRaceSessions(year);
-  const raceByMeeting = new Map<number, number>();
-  races.forEach((s) => raceByMeeting.set(s.meeting_key, s.session_key));
+  const sprints = await seasonSprintSessions(year);
 
   // Batch the whole season into 4 multi-value requests (OpenF1 accepts
   // repeated session_key). ponytail: swap for per-race cached requests only
   // if a single batch response outgrows browser memory (~rare).
   const sks = races.map((r) => r.session_key);
+  const sprintSks = sprints.map((s) => s.session_key);
   const [results, pit, stints, drivers] = await Promise.all([
-    cached<ResultRow>("session_result", { session_key: sks }, () =>
-      getOpenF1<ResultRow>("session_result", { session_key: sks })),
+    // session_result spans Race + Sprint (points); mixed batch stays HTTP 200
+    // as long as ≥1 key has rows — ponytail: future/empty sessions
+    // contribute zero rows via the `?? []` below, no special-casing.
+    cached<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }, () =>
+      getOpenF1<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] })),
     cached<SeasonPitStop>("pit", { session_key: sks }, () =>
       getOpenF1<SeasonPitStop>("pit", { session_key: sks })),
     cached<SeasonStint>("stints", { session_key: sks }, () =>
@@ -120,6 +128,12 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     stints: stintsBySession.get(s.session_key) ?? [],
     drivers: driversBySession.get(s.session_key) ?? [],
   }));
+  // ponytail: empty/future sprints (`?? []`) contribute zero points, no crash.
+  const perSprint = sprints.map((s) => ({
+    sk: s.session_key,
+    meetingKey: s.meeting_key,
+    results: resultsBySession.get(s.session_key) ?? [],
+  }));
 
   const nameOf = (meetingKey: number, n: number) => {
     const d = perRace.find((p) => p.meetingKey === meetingKey)?.drivers.find((x) => x.driver_number === n);
@@ -132,7 +146,7 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
   for (const meeting of m) {
     const p = perRace.find((r) => r.meetingKey === meeting.meeting_key);
     if (!p) continue;
-    const sorted = [...p.results].filter((r) => r.driver_number).sort((a, b) => a.position - b.position);
+    const sorted = [...p.results].filter((r) => r.driver_number).sort((a, b) => (a.position ?? Infinity) - (b.position ?? Infinity));
     if (!sorted.length) continue;
     const winner = sorted[0];
     progression.push({
@@ -152,6 +166,20 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     });
   }
 
+  // ponytail: sprint points merge into the same weekend's racePoints — one
+  // x-axis point per meeting (sprint Sat + race Sun are one chart column);
+  // winner/podium stay Race-based above.
+  for (const sp of perSprint) {
+    const entry = progression.find((p) => p.meetingKey === sp.meetingKey);
+    if (!entry) continue;
+    for (const r of sp.results.filter((r) => r.driver_number)) {
+      entry.racePoints.push({
+        name: nameOf(sp.meetingKey, r.driver_number!),
+        points: r.points ?? 0,
+      });
+    }
+  }
+
   // Driver + team championship
   const perDriver = new Map<string, DriverChampionship>();
   for (const p of perRace) {
@@ -165,6 +193,19 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
       if (r.position === 1) cur.wins++;
       if (r.position >= 1 && r.position <= 3) cur.podiums++;
       if (r.dnf) cur.dnf++;
+      perDriver.set(name, cur);
+    }
+  }
+  // ponytail: sprint results add points ONLY — wins/podiums/dnf stay
+  // Race-based (upgrade: sprint-win countback for official tie-breaks).
+  for (const sp of perSprint) {
+    for (const r of sp.results.filter((r) => r.driver_number)) {
+      const name = nameOf(sp.meetingKey, r.driver_number!);
+      const cur = perDriver.get(name) ?? {
+        driverName: name, team: teamOf(sp.meetingKey, r.driver_number!),
+        points: 0, wins: 0, podiums: 0, dnf: 0,
+      };
+      cur.points += r.points ?? 0;
       perDriver.set(name, cur);
     }
   }

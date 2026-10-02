@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend,
   BarChart, Bar, CartesianGrid, ComposedChart, Area,
@@ -30,13 +31,13 @@ const TABS: { id: Tab; label: string }[] = [
 
 interface Props {
   meeting: Meeting;
-  onBack: () => void;
 }
 
-export const Race = ({ meeting, onBack }: Props) => {
+export const Race = ({ meeting }: Props) => {
+  const navigate = useNavigate();
+  const { year = "", slug = "", tab = "pace" } = useParams();
   const [bundle, setBundle] = useState<RaceBundle | null>(null);
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<Tab>("pace");
   const [refDriver, setRefDriver] = useState<number | null>(null);
   const [rivalDriver, setRivalDriver] = useState<number | null>(null);
   const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 0);
@@ -127,14 +128,14 @@ export const Race = ({ meeting, onBack }: Props) => {
       <Card className="mb-6">
         <div className="flex flex-row items-start justify-between space-y-0 pb-4">
           <div className="space-y-1">
-            <Button variant="outline" onClick={onBack}>← Season</Button>
+            <Button variant="outline" onClick={() => navigate(`/season/${meeting.year}`)}>← Season</Button>
             <h1 className="text-[17px] font-semibold tracking-tight">{meeting.meeting_name}</h1>
             <div className="text-muted-foreground text-sm">{meeting.circuit_short_name} · {meeting.date_start}</div>
           </div>
         </div>
       </Card>
 
-      <Tabs defaultValue="pace" value={tab} onValueChange={(val) => setTab(val as Tab)} className="w-full">
+      <Tabs value={tab} onValueChange={(val) => navigate(`/race/${year}/${slug}/${val}`)} className="w-full">
         <TabsList className="grid w-full grid-cols-4 bg-muted">
           {TABS.map((t) => (
             <TabsTrigger key={t.id} value={t.id} className="flex-1 items-center justify-center px-2 h-10">

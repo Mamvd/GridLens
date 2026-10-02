@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
   BarChart, Bar,
 } from "recharts";
 import { seasonBundle, type SeasonStats } from "../data/season";
 import type { Meeting } from "../api/openf1";
+import { slugForMeeting } from "../lib/slug";
 import { ChartCard, ChartTooltip } from "@/components/charts/ChartCard";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,7 +18,6 @@ import {
 interface Props {
   year: number;
   meetings: Meeting[];
-  onOpenRace: (meeting: Meeting) => void;
 }
 
 const SECTION = "mb-3 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground";
@@ -52,7 +53,8 @@ const ChartSkeleton = ({ className }: { className?: string }) => (
   </Card>
 );
 
-export const Season = ({ year, meetings, onOpenRace }: Props) => {
+export const Season = ({ year, meetings }: Props) => {
+  const navigate = useNavigate();
   const [loaded, setLoaded] = useState<{ year: number; stats: SeasonStats } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -180,7 +182,7 @@ export const Season = ({ year, meetings, onOpenRace }: Props) => {
                     key={m.meeting_key}
                     type="button"
                     title={m.meeting_name}
-                    onClick={() => onOpenRace(m)}
+                    onClick={() => navigate(`/race/${m.year}/${slugForMeeting(meetings, m)}`)}
                     className="flex items-center gap-3 rounded-lg border bg-muted/40 px-3 py-2.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     <img

@@ -106,13 +106,18 @@ export interface Session {
 }
 
 export interface Driver {
-  driver_key: number;
-  driver_name: string;
+  meeting_key: number;
+  session_key: number;
   driver_number: number;
-  team_key: number;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  broadcast_name: string;
+  name_acronym: string;
   team_name: string;
   team_colour: string;
 }
+// ponytail: no composed display-name field on the API — build `first last` at call sites; upgrade: add `nameOfDriver` helper in data/race.ts once a second call site lands.
 
 export interface Lap {
   meeting_key: number;
@@ -172,9 +177,11 @@ export interface SessionResult {
   driver_number: number;
   position: number;
   points: number | null;
-  gap: string | null;
-  is_dns: number | null;
-  is_dnf: number | null;
+  dnf: boolean;
+  dns: boolean;
+  dsq: boolean;
+  gap_to_leader: number | null;
+  duration: number | null;
 }
 
 export interface Overtake {

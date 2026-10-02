@@ -5,6 +5,10 @@ import {
 } from "../api/openf1";
 import { getCached, setCached } from "../api/cache";
 
+// ponytail: API has no display-name field — compose first+last; keep one helper,
+// add shared formatter in lib/ if a third call site needs styling.
+export const nameOfDriver = (d: Driver): string => `${d.first_name} ${d.last_name}`;
+
 // --- fetch helpers (cached cheap resources) ---
 
 const cached = async <T>(resource: string, ops: Parameters<typeof getCached>[1], fn: () => Promise<T[]>) => {
@@ -25,7 +29,6 @@ export interface RaceBundle {
   results: SessionResult[];
   overtakes: Overtake[];
   grid: StartingGrid[];
-  nameToDriver: Map<string, Driver>;
   numberToDriver: Map<number, Driver>;
 }
 
@@ -58,11 +61,10 @@ export const loadRaceBundle = async (
       })(),
     ]);
 
-  const nameToDriver = new Map(drivers.map((d) => [d.driver_name, d]));
   const numberToDriver = new Map(drivers.map((d) => [d.driver_number, d]));
   return {
     sessionKey, drivers, laps, intervals, stints, pitEvents, results, overtakes, grid,
-    nameToDriver, numberToDriver,
+    numberToDriver,
   };
 };
 

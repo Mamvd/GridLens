@@ -28,11 +28,16 @@ export interface SeasonStint {
 }
 
 export interface RaceDriver {
-  driver_name: string;
+  // OpenF1 has no driver_name field (verified 2023-2025) — name is built from first+last.
+  first_name: string;
+  last_name: string;
   team_name: string;
   driver_number: number;
   session_key: number;
 }
+
+// API sends boolean dnf/dns/dsq; SessionResult type still declares stale is_dnf (always null).
+type ResultRow = SessionResult & { dnf?: boolean };
 
 // All GP meetings for a year (meetings?year=N works; exclude tests).
 export const seasonMeetings = (year: number) =>
@@ -84,8 +89,8 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
   // if a single batch response outgrows browser memory (~rare).
   const sks = races.map((r) => r.session_key);
   const [results, pit, stints, drivers] = await Promise.all([
-    cached<SessionResult>("session_result", { session_key: sks }, () =>
-      getOpenF1<SessionResult>("session_result", { session_key: sks })),
+    cached<ResultRow>("session_result", { session_key: sks }, () =>
+      getOpenF1<ResultRow>("session_result", { session_key: sks })),
     cached<SeasonPitStop>("pit", { session_key: sks }, () =>
       getOpenF1<SeasonPitStop>("pit", { session_key: sks })),
     cached<SeasonStint>("stints", { session_key: sks }, () =>
@@ -116,8 +121,10 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     drivers: driversBySession.get(s.session_key) ?? [],
   }));
 
-  const nameOf = (meetingKey: number, n: number) =>
-    perRace.find((p) => p.meetingKey === meetingKey)?.drivers.find((d) => d.driver_number === n)?.driver_name ?? `#${n}`;
+  const nameOf = (meetingKey: number, n: number) => {
+    const d = perRace.find((p) => p.meetingKey === meetingKey)?.drivers.find((x) => x.driver_number === n);
+    return d ? `${d.first_name} ${d.last_name}` : `#${n}`;
+  };
   const teamOf = (meetingKey: number, n: number) =>
     perRace.find((p) => p.meetingKey === meetingKey)?.drivers.find((d) => d.driver_number === n)?.team_name ?? "Unknown";
 
@@ -157,7 +164,7 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
       cur.points += r.points ?? 0;
       if (r.position === 1) cur.wins++;
       if (r.position >= 1 && r.position <= 3) cur.podiums++;
-      if (r.is_dnf === 1) cur.dnf++;
+      if (r.dnf) cur.dnf++;
       perDriver.set(name, cur);
     }
   }

@@ -5,15 +5,15 @@ import { cn } from "@/lib/utils"
 
 export const chartTooltip = {
   contentStyle: {
-    background: "hsl(var(--card))",
-    border: "1px solid hsl(var(--border))",
+    backgroundColor: "var(--card)",
+    border: "1px solid var(--border)",
     borderRadius: "8px",
     fontSize: 12,
-    color: "hsl(var(--card-foreground))",
+    color: "var(--card-foreground)",
   } as React.CSSProperties,
-  labelStyle: { color: "hsl(var(--muted-foreground))", fontWeight: 600 } as React.CSSProperties,
-  itemStyle: { color: "#ed1c24" } as React.CSSProperties,
-  cursor: { stroke: "hsl(var(--border))", strokeDasharray: "3 3" } as Record<string, string>,
+  labelStyle: { color: "var(--muted-foreground)", fontWeight: 600 } as React.CSSProperties,
+  itemStyle: { color: "var(--chart-1)" } as React.CSSProperties,
+  cursor: { stroke: "var(--border)", strokeDasharray: "3 3" } as Record<string, string>,
 }
 
 type Props = {

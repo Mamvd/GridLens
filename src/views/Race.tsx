@@ -1,14 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip,
-  BarChart, Bar, CartesianGrid, Legend, ComposedChart, Area,
+  LineChart, Line, XAxis, YAxis, Tooltip, Legend,
+  BarChart, Bar, CartesianGrid, ComposedChart, Area,
 } from "recharts";
 import {
   loadRaceBundle, computeStrategies, driverLapsForSectors, fmtLapTime,
+  nameOfDriver,
   type RaceBundle,
 } from "../data/race";
 import type { Meeting } from "../api/openf1";
 import { seasonRaceSessions } from "../data/season";
+
+import { Button } from "@/components/ui/button";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ChartCard } from "@/components/charts/ChartCard";
+import { chartTooltip } from "@/components/charts/ChartCard";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
 type Tab = "pace" | "gaps" | "strategy" | "pit";
 const TABS: { id: Tab; label: string }[] = [
@@ -18,9 +27,6 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "pit", label: "Pit" },
 ];
 
-const COMPOUND_COLOR: Record<string, string> = {
-  SOFT: "#e23b3b", MEDIUM: "#f2c11e", HARD: "#3a3a3a", INTERMEDIATE: "#2fa3d9", WET: "#1565c0",
-};
 
 interface Props {
   meeting: Meeting;
@@ -33,16 +39,31 @@ export const Race = ({ meeting, onBack }: Props) => {
   const [tab, setTab] = useState<Tab>("pace");
   const [refDriver, setRefDriver] = useState<number | null>(null);
   const [rivalDriver, setRivalDriver] = useState<number | null>(null);
+  const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 0);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const handleResize = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    handleResize();
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   // find the race session for this meeting
   useEffect(() => {
+    let alive = true;
+    setError("");
+    setBundle(null);
+    setRefDriver(null);
+    setRivalDriver(null);
     seasonRaceSessions(meeting.year)
       .then((sessions) => {
+        if (!alive) return;
         const race = sessions.find((s) => s.meeting_key === meeting.meeting_key);
         if (!race) { setError("No race session found for this meeting."); return; }
-        setRefDriver(null); setRivalDriver(null);
         loadRaceBundle(race.session_key)
           .then((b) => {
+            if (!alive) return;
             setBundle(b);
             const sorted = [...b.results].filter((r) => r.driver_number).sort((a, b2) => a.position - b2.position);
             if (sorted.length >= 2) {
@@ -50,89 +71,160 @@ export const Race = ({ meeting, onBack }: Props) => {
               setRivalDriver(sorted[1].driver_number);
             }
           })
-          .catch((e) => setError(String(e)));
+          .catch((e) => alive && setError(String(e)));
       })
-      .catch((e) => setError(String(e)));
-  }, [meeting]);
+      .catch((e) => alive && setError(String(e)));
+    return () => { alive = false; };
+  }, [meeting, reloadKey]);
 
   const strategies = useMemo(() => (bundle ? computeStrategies(bundle) : []), [bundle]);
 
-  if (error) return <div className="error">{error}</div>;
-  if (!bundle) return <div className="muted">Loading {meeting.meeting_name}…</div>;
+  if (error) {
+    return (
+      <Card className="border-destructive/50 bg-destructive/10">
+        <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+          <p className="text-[13px] text-destructive" title={error}>Failed to load {meeting.meeting_name}.</p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setError(""); setReloadKey((k) => k + 1); }}
+          >
+            Retry
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+  const chartHeight = width < 768 ? 260 : 320;
+
+  if (!bundle) return (
+      <div className="space-y-6">
+        <Card>
+          <CardContent className="space-y-3 p-6">
+            <Skeleton className="h-4 w-48" />
+            <Skeleton className="h-3 w-64" />
+            <Skeleton className="h-9 w-full max-w-[360px]" />
+          </CardContent>
+        </Card>
+        <ChartCard title="Loading…" height={chartHeight}>
+          <div className="flex h-full items-center justify-center" />
+        </ChartCard>
+      </div>
+    );
 
   return (
     <div className="race">
-      <header className="race-head">
-        <button className="back" onClick={onBack}>← Season</button>
-        <div>
-          <h2>{meeting.meeting_name}</h2>
-          <div className="muted">{meeting.circuit_short_name} · {meeting.date_start}</div>
+      <Card className="mb-6">
+        <div className="flex flex-row items-start justify-between space-y-0 pb-4">
+          <div className="space-y-1">
+            <Button variant="outline" onClick={onBack}>← Season</Button>
+            <h1 className="text-[17px] font-semibold tracking-tight">{meeting.meeting_name}</h1>
+            <div className="text-muted-foreground text-sm">{meeting.circuit_short_name} · {meeting.date_start}</div>
+          </div>
         </div>
-      </header>
+      </Card>
 
-      <nav className="tabs">
-        {TABS.map((t) => (
-          <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      {tab === "pace" && (
-        <PaceTab bundle={bundle} strategies={strategies} refDriver={refDriver} setRefDriver={setRefDriver} />
-      )}
-      {tab === "gaps" && (
-        <GapsTab bundle={bundle} refDriver={refDriver} rivalDriver={rivalDriver}
-          setRefDriver={setRefDriver} setRivalDriver={setRivalDriver} />
-      )}
-      {tab === "strategy" && <StrategyTab strategies={strategies} />}
-      {tab === "pit" && <PitTab strategies={strategies} />}
+      <Tabs defaultValue="pace" value={tab} onValueChange={(val) => setTab(val as Tab)} className="w-full">
+        <TabsList className="grid w-full grid-cols-4 bg-muted">
+          {TABS.map((t) => (
+            <TabsTrigger key={t.id} value={t.id} className="flex-1 items-center justify-center px-2 h-10">
+              {t.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        <TabsContent value="pace">
+          <PaceTab
+            bundle={bundle}
+            strategies={strategies}
+            refDriver={refDriver}
+            setRefDriver={setRefDriver}
+            chartHeight={chartHeight}
+          />
+        </TabsContent>
+        <TabsContent value="gaps">
+          <GapsTab
+            bundle={bundle}
+            refDriver={refDriver}
+            rivalDriver={rivalDriver}
+            setRefDriver={setRefDriver}
+            setRivalDriver={setRivalDriver}
+            chartHeight={chartHeight}
+          />
+        </TabsContent>
+        <TabsContent value="strategy">
+          <StrategyTab strategies={strategies} />
+        </TabsContent>
+        <TabsContent value="pit">
+          <PitTab strategies={strategies} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 };
 
 // ---- Pace: sector trace for a driver ----
-const PaceTab = ({ bundle, strategies, refDriver, setRefDriver }: {
+const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
   bundle: RaceBundle; strategies: ReturnType<typeof computeStrategies>;
   refDriver: number | null; setRefDriver: (n: number | null) => void;
+  chartHeight: number;
 }) => {
   const laps = refDriver != null ? driverLapsForSectors(bundle, refDriver) : [];
   const fastestLap = strategies.find((s) => s.driver.driver_number === refDriver)?.fastestLap ?? null;
   return (
-    <section>
-      <label>
-        Driver{" "}
-        <select value={refDriver ?? ""} onChange={(e) => setRefDriver(e.target.value ? +e.target.value : null)}>
-          <option value="">—</option>
-          {bundle.drivers.map((d) => (
-            <option key={d.driver_number} value={d.driver_number}>
-              {d.driver_name}
-            </option>
-          ))}
-        </select>
-        {fastestLap != null && <span className="muted"> · fastest lap {fmtLapTime(fastestLap)}</span>}
-      </label>
-      <ResponsiveContainer width="100%" height={320}>
+    <section className="space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between sm:space-x-4">
+        <div className="space-y-1">
+          <label className="text-muted-foreground text-sm">Driver</label>
+          <Select
+            value={refDriver != null ? String(refDriver) : undefined}
+            onValueChange={(v) => setRefDriver(v ? +v : null)}
+          >
+            <SelectTrigger className="w-[200px] sm:w-auto">
+              <SelectValue placeholder="—" />
+            </SelectTrigger>
+            <SelectContent>
+              {bundle.drivers.map((d) => (
+                <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+                  {nameOfDriver(d)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        {fastestLap != null && (
+          <div className="text-muted-foreground text-sm self-end sm:self-start">
+            · fastest lap {fmtLapTime(fastestLap)}
+          </div>
+        )}
+      </div>
+      <ChartCard title="Sector Times" height={chartHeight}>
         <ComposedChart data={laps}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="lap_number" tick={{ fontSize: 10 }} />
-          <YAxis tick={{ fontSize: 10 }} unit="s" domain={["auto", "auto"]} />
-          <Tooltip formatter={(v) => (typeof v === "number" ? `${v.toFixed(3)}s` : "—")} />
-          <Area dataKey="total" name="Lap" fill="#4a7dff22" stroke="#4a7dff" />
-          <Line dataKey="s1" name="Sector 1" dot={false} strokeWidth={1.5} stroke="#34c98e" />
-          <Line dataKey="s2" name="Sector 2" dot={false} strokeWidth={1.5} stroke="#f2c11e" />
-          <Line dataKey="s3" name="Sector 3" dot={false} strokeWidth={1.5} stroke="#e23b3b" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+          <XAxis dataKey="lap_number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+          <YAxis tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" unit="s" domain={["auto", "auto"]} />
+          <Tooltip
+            contentStyle={chartTooltip.contentStyle}
+            labelStyle={chartTooltip.labelStyle}
+            itemStyle={chartTooltip.itemStyle}
+            cursor={chartTooltip.cursor}
+            formatter={(v) => (typeof v === "number" ? `${v.toFixed(3)}s` : "—")}
+          />
+          <Area dataKey="total" name="Lap" fill="var(--chart-4)33" stroke="var(--chart-4)" />
+          <Line dataKey="s1" name="Sector 1" dot={false} strokeWidth={1.5} stroke="var(--chart-5)" />
+          <Line dataKey="s2" name="Sector 2" dot={false} strokeWidth={1.5} stroke="var(--chart-2)" />
+          <Line dataKey="s3" name="Sector 3" dot={false} strokeWidth={1.5} stroke="var(--chart-1)" />
           <Legend wrapperStyle={{ fontSize: 11 }} />
         </ComposedChart>
-      </ResponsiveContainer>
+      </ChartCard>
     </section>
   );
 };
 
 // ---- Gaps: interval trace for a driver (gap to car ahead) ----
-const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver }: {
+const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver, chartHeight }: {
   bundle: RaceBundle; refDriver: number | null; rivalDriver: number | null;
   setRefDriver: (n: number | null) => void; setRivalDriver: (n: number | null) => void;
+  chartHeight: number;
 }) => {
   const series = useMemo(() => {
     if (refDriver == null) return [];
@@ -147,93 +239,181 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver 
   }, [bundle, refDriver]);
 
   return (
-    <section>
-      <div className="row">
-        <label>Driver
-          <select value={refDriver ?? ""} onChange={(e) => setRefDriver(e.target.value ? +e.target.value : null)}>
-            <option value="">—</option>
-            {bundle.drivers.map((d) => <option key={d.driver_number} value={d.driver_number}>{d.driver_name}</option>)}
-          </select>
-        </label>
-        <label>vs. (context)
-          <select value={rivalDriver ?? ""} onChange={(e) => setRivalDriver(e.target.value ? +e.target.value : null)}>
-            <option value="">—</option>
-            {bundle.drivers.map((d) => <option key={d.driver_number} value={d.driver_number}>{d.driver_name}</option>)}
-          </select>
-        </label>
+    <section className="space-y-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="space-y-1">
+          <label className="text-muted-foreground text-sm">Driver</label>
+          <Select
+            value={refDriver != null ? String(refDriver) : undefined}
+            onValueChange={(v) => setRefDriver(v ? +v : null)}
+          >
+            <SelectTrigger className="w-[200px] sm:w-auto">
+              <SelectValue placeholder="—" />
+            </SelectTrigger>
+            <SelectContent>
+              {bundle.drivers.map((d) => (
+                <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+                  {nameOfDriver(d)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-muted-foreground text-sm">vs. (context)</label>
+          <Select
+            value={rivalDriver != null ? String(rivalDriver) : undefined}
+            onValueChange={(v) => setRivalDriver(v ? +v : null)}
+          >
+            <SelectTrigger className="w-[200px] sm:w-auto">
+              <SelectValue placeholder="—" />
+            </SelectTrigger>
+            <SelectContent>
+              {bundle.drivers.map((d) => (
+                <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+                  {nameOfDriver(d)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
       <p className="muted small">Gap to the car ahead (intervals). Negative = behind / being lapped.</p>
-      <ResponsiveContainer width="100%" height={320}>
+      <ChartCard title="Gap to Car Ahead" height={chartHeight}>
         <LineChart data={series}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="t" tick={{ fontSize: 10 }} minTickGap={60} />
-          <YAxis tick={{ fontSize: 10 }} />
-          <Tooltip />
-          <Line dataKey="gap" name="Gap" dot={false} strokeWidth={2} />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+          <XAxis dataKey="t" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" minTickGap={60} />
+          <YAxis tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+          <Tooltip
+            contentStyle={chartTooltip.contentStyle}
+            labelStyle={chartTooltip.labelStyle}
+            itemStyle={chartTooltip.itemStyle}
+            cursor={chartTooltip.cursor}
+            // ponytail: interval is seconds (not ms) — keep fmtLapTime for m:ss, sign prefix for lapped gaps.
+            formatter={(v) => (typeof v === "number" ? (v < 0 ? `-${fmtLapTime(-v)}` : fmtLapTime(v)) : "—")}
+          />
+          <Line dataKey="gap" name="Gap" dot={false} strokeWidth={2} stroke="var(--chart-4)" />
         </LineChart>
-      </ResponsiveContainer>
+      </ChartCard>
     </section>
   );
 };
 
 // ---- Strategy: compound sequence + stops per driver ----
-const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => (
-  <section>
-    <div className="strategy">
-      {strategies.map((s) => (
-        <div key={s.driver.driver_number} className="strat-row">
-          <span className="num">{s.finishPosition ?? "—"}</span>
-          <span>{s.driver.driver_name}</span>
-          <span className="comps">
-            {s.compounds.map((c, i) => (
-              <span key={i} className="chip"
-                style={{ background: COMPOUND_COLOR[c] ?? "#888" }} title={`${c} · ${s.stintLaps[i]} laps`}>
-                {c?.slice(0, 3)}
+const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => {
+  if (!strategies || strategies.length === 0) {
+    return (
+      <Card className="w-full">
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold">Driver Strategies</CardTitle>
+        </CardHeader>
+        <CardContent className="h-[320px] flex items-center justify-center">
+          <Skeleton className="w-full h-4" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="w-full">
+      <CardHeader className="mb-4">
+        <CardTitle className="text-sm font-semibold">Driver Strategies</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          {strategies.map((s) => (
+            <div key={s.driver.driver_number} className="flex items-center gap-4 px-3 py-2 border-b border-muted/50 last:border-b-0">
+              <span className="min-w-[40px] text-muted-foreground text-sm">{s.finishPosition ?? "—"}</span>
+              <span className="flex-1 text-muted-foreground text-sm">{nameOfDriver(s.driver)}</span>
+              <span className="flex-shrink-0 space-x-2">
+                {s.compounds.map((c, i) => {
+                  const compoundName = c;
+                  const bgColor = c === "SOFT" ? "var(--chart-1)" : c === "MEDIUM" ? "var(--chart-2)" : c === "HARD" ? "var(--chart-3)" : "var(--muted)";
+                  const textColor = c === "MEDIUM" ? "var(--foreground)" : "var(--card-foreground)";
+                  return (
+                    <span
+                      key={i}
+                      className="px-2 py-0.5 rounded text-xs font-medium"
+                      style={{
+                        backgroundColor: bgColor,
+                        color: textColor,
+                      }}
+                      title={`${compoundName} · ${s.stintLaps[i]} laps`}
+                    >
+                      {compoundName}
+                    </span>
+                  );
+                })}
               </span>
-            ))}
-          </span>
-          <span className="muted small">{s.totalStops} stop{s.totalStops === 1 ? "" : "s"}</span>
+              <span className="min-w-[60px] text-muted-foreground text-sm">
+                {s.totalStops} stop{s.totalStops === 1 ? "" : "s"}
+              </span>
+            </div>
+          ))}
         </div>
-      ))}
-    </div>
-  </section>
-);
+      </CardContent>
+    </Card>
+  );
+};
 
 // ---- Pit: stop-time + overtakes leaderboard ----
 const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => {
+  if (!strategies || strategies.length === 0) {
+    return (
+      <Card className="w-full">
+        <CardContent className="grid grid-cols-2 gap-4">
+          <Skeleton className="h-[260px]" />
+          <Skeleton className="h-[260px]" />
+        </CardContent>
+      </Card>
+    );
+  }
+
   const pitRows = strategies
     .filter((s) => s.avgStopTime != null)
     .sort((a, b) => (a.avgStopTime! - b.avgStopTime!));
   const overtakeRows = strategies
     .filter((s) => s.overtakesMade + s.overtakesLost > 0)
     .sort((a, b) => b.overtakesMade - a.overtakesMade);
+
   return (
-    <div className="row">
-      <section>
-        <h4>Pit stop times (avg)</h4>
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={pitRows.map((s) => ({ name: s.driver.driver_name, avg: s.avgStopTime! }))} layout="vertical">
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis type="number" tick={{ fontSize: 10 }} />
-            <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} />
-            <Tooltip formatter={(v) => (typeof v === "number" ? `${v.toFixed(2)}s` : "—")} />
-            <Bar dataKey="avg" fill="#4a7dff" name="Avg stop (s)" />
-          </BarChart>
-        </ResponsiveContainer>
-      </section>
-      <section>
-        <h4>Overtakes made</h4>
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={overtakeRows.map((s) => ({ name: s.driver.driver_name, made: s.overtakesMade, lost: s.overtakesLost }))}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis type="number" tick={{ fontSize: 10 }} />
-            <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} />
-            <Tooltip />
-            <Bar dataKey="made" fill="#34c98e" name="Made" />
-            <Bar dataKey="lost" fill="#e23b3b" name="Lost" />
-          </BarChart>
-        </ResponsiveContainer>
-      </section>
-    </div>
+    <Card className="w-full">
+      <CardContent className="grid grid-cols-2 gap-4">
+        <section>
+          <ChartCard title="Pit Stop Times (avg)" height={260}>
+            <BarChart data={pitRows.map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! }))} layout="vertical">
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+              <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+              <Tooltip
+                contentStyle={chartTooltip.contentStyle}
+                labelStyle={chartTooltip.labelStyle}
+                itemStyle={chartTooltip.itemStyle}
+                cursor={chartTooltip.cursor}
+                formatter={(v) => (typeof v === "number" ? `${v.toFixed(2)}s` : "—")}
+              />
+              <Bar dataKey="avg" fill="var(--chart-4)" name="Avg stop (s)" />
+            </BarChart>
+          </ChartCard>
+        </section>
+        <section>
+          <ChartCard title="Overtakes Made" height={260}>
+            <BarChart data={overtakeRows.map((s) => ({ name: nameOfDriver(s.driver), made: s.overtakesMade, lost: s.overtakesLost }))}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+              <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+              <Tooltip
+                contentStyle={chartTooltip.contentStyle}
+                labelStyle={chartTooltip.labelStyle}
+                itemStyle={chartTooltip.itemStyle}
+                cursor={chartTooltip.cursor}
+              />
+              <Bar dataKey="made" fill="var(--chart-5)" name="Made" />
+              <Bar dataKey="lost" fill="var(--chart-1)" name="Lost" />
+            </BarChart>
+          </ChartCard>
+        </section>
+      </CardContent>
+    </Card>
   );
 };

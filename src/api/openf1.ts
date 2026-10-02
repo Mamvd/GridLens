@@ -37,25 +37,36 @@ const runLimited = pLimit(4);
 // requests/sec, so a pure concurrency cap still bursts into 429s.
 const MIN_SPACING_MS = 500;
 let lastStart = 0;
-const spacingGate = async () => {
+const spacingGate = async (signal?: AbortSignal) => {
   const wait = lastStart + MIN_SPACING_MS - Date.now();
-  if (wait > 0) await delay(wait);
+  if (wait > 0) await delay(wait, signal);
   lastStart = Date.now();
 };
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const abortErr = () => new DOMException("Aborted", "AbortError");
 
-const fetchWithBackoff = async (url: string, attempt = 0): Promise<Response> => {
-  const res = await fetch(url);
+// delay that rejects immediately when signal aborts (fast cancel of spacing/backoff waits).
+const delay = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(abortErr()); return; }
+    const onAbort = () => { clearTimeout(t); reject(abortErr()); };
+    const t = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+const fetchWithBackoff = async (url: string, signal?: AbortSignal, attempt = 0): Promise<Response> => {
+  if (signal?.aborted) throw abortErr();
+  const res = await fetch(url, { signal });
   if (res.status === 429 && attempt < 5) {
     const wait = 1500 * 2 ** attempt + Math.random() * 500;
-    await delay(wait);
-    return fetchWithBackoff(url, attempt + 1);
+    await delay(wait, signal); // rejects on abort → stops retrying without another request
+    return fetchWithBackoff(url, signal, attempt + 1);
   }
   return res;
 };
 
-export const getOpenF1 = async <T>(resource: string, ops: Ops = {}): Promise<T[]> => {
+export const getOpenF1 = async <T>(resource: string, ops: Ops = {}, opts?: { signal?: AbortSignal }): Promise<T[]> => {
+  const signal = opts?.signal;
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(ops)) {
     const values = Array.isArray(v) ? v : [v];
@@ -67,9 +78,11 @@ export const getOpenF1 = async <T>(resource: string, ops: Ops = {}): Promise<T[]
   // ponytail: requests are spaced out (one start per MIN_SPACING_MS) and
   // capped at pLimit(4), so a season-wide fan-out doesn't trip 429s.
   // Backoff in fetchWithBackoff absorbs any that still get throttled.
+  if (signal?.aborted) throw abortErr(); // don't even enqueue
   const res = await runLimited(async () => {
-    await spacingGate();
-    return fetchWithBackoff(url);
+    if (signal?.aborted) throw abortErr(); // aborted while queued in pLimit
+    await spacingGate(signal);
+    return fetchWithBackoff(url, signal);
   });
   if (res.status === 429) throw new Error(`OpenF1 rate-limited on ${resource}`);
   if (!res.ok) {

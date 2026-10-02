@@ -13,10 +13,19 @@ export default function App() {
   const [meeting, setMeeting] = useState<Meeting | null>(null);
 
   useEffect(() => {
+    let alive = true;
+    const controller = new AbortController();
     setMeeting(null);
-    getOpenF1<Meeting>("meetings", { year })
-      .then((all) => setMeetings(all.filter((m) => m.meeting_name.includes("Grand Prix"))))
-      .catch(() => setMeetings([]));
+    setMeetings([]);
+    getOpenF1<Meeting>("meetings", { year }, { signal: controller.signal })
+      .then((all) => {
+        if (alive) setMeetings(all.filter((m) => m.meeting_name.includes("Grand Prix")));
+      })
+      .catch((e) => {
+        if ((e as Error)?.name === "AbortError") return;
+        if (alive) setMeetings([]);
+      });
+    return () => { alive = false; controller.abort(); };
   }, [year]);
 
   return (

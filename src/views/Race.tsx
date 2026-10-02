@@ -52,6 +52,7 @@ export const Race = ({ meeting, onBack }: Props) => {
   // find the race session for this meeting
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
     setError("");
     setBundle(null);
     setRefDriver(null);
@@ -65,16 +66,25 @@ export const Race = ({ meeting, onBack }: Props) => {
           .then((b) => {
             if (!alive) return;
             setBundle(b);
-            const sorted = [...b.results].filter((r) => r.driver_number).sort((a, b2) => a.position - b2.position);
+            const sorted = [...b.results].filter((r) => r.driver_number).sort((a, b2) => (a.position ?? Infinity) - (b2.position ?? Infinity));
             if (sorted.length >= 2) {
               setRefDriver(sorted[0].driver_number);
               setRivalDriver(sorted[1].driver_number);
             }
           })
-          .catch((e) => alive && setError(String(e)));
+          .catch((e) => {
+            if ((e as Error)?.name === "AbortError") return;
+            if (alive) setError(String(e));
+          });
       })
-      .catch((e) => alive && setError(String(e)));
-    return () => { alive = false; };
+      .catch((e) => {
+        if ((e as Error)?.name === "AbortError") return;
+        if (alive) setError(String(e));
+      });
+    // ponytail: signal not threaded through seasonRaceSessions/loadRaceBundle
+    // (data layer frozen) — alive guard prevents stale meeting state; abort
+    // activates once those accept opts.
+    return () => { alive = false; controller.abort(); };
   }, [meeting, reloadKey]);
 
   const strategies = useMemo(() => (bundle ? computeStrategies(bundle) : []), [bundle]);

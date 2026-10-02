@@ -53,22 +53,31 @@ const ChartSkeleton = ({ className }: { className?: string }) => (
 );
 
 export const Season = ({ year, meetings, onOpenRace }: Props) => {
-  const [stats, setStats] = useState<SeasonStats | null>(null);
+  const [loaded, setLoaded] = useState<{ year: number; stats: SeasonStats } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+  // only expose stats whose year matches the current prop — a slow older
+  // bundle can never render under a newer season.
+  const stats = loaded && loaded.year === year ? loaded.stats : null;
 
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
     setLoading(true);
     setError("");
     seasonBundle(year, meetings)
       .then((b) => {
-        if (alive) setStats(b.stats);
+        if (alive) setLoaded({ year, stats: b.stats });
       })
-      .catch((e) => alive && setError(String(e)))
+      .catch((e) => {
+        if ((e as Error)?.name === "AbortError") return;
+        if (alive) setError(String(e));
+      })
       .finally(() => alive && setLoading(false));
-    return () => { alive = false; };
+    // ponytail: signal not threaded through seasonBundle (data layer frozen) —
+    // alive + year-scoped payload guard staleness; abort activates once opts lands.
+    return () => { alive = false; controller.abort(); };
   }, [year, meetings, reloadKey]);
 
   // cumulative points per driver across the season

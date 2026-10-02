@@ -231,6 +231,8 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
 };
 
 // ---- Gaps: interval trace for a driver (gap to car ahead) ----
+type GapPoint = { ms: number; t: string; gap: number | null; rivalGap: number | null };
+
 const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver, chartHeight }: {
   bundle: RaceBundle; refDriver: number | null; rivalDriver: number | null;
   setRefDriver: (n: number | null) => void; setRivalDriver: (n: number | null) => void;
@@ -243,10 +245,48 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
       .sort((a, b) => a.date.localeCompare(b.date));
     const step = Math.max(1, Math.ceil(raw.length / 150));
     return raw.filter((_, i) => i % step === 0).map((i) => ({
+      ms: new Date(i.date).getTime(),
       t: new Date(i.date).toLocaleTimeString([], { hour12: false }),
       gap: i.interval!,
     }));
   }, [bundle, refDriver]);
+
+  // Rival series — same downsample stride; empty when unselected or identical
+  // to refDriver (stale state → render one line, not a duplicate).
+  const rivalSeries = useMemo(() => {
+    if (rivalDriver == null || rivalDriver === refDriver) return [];
+    const raw = bundle.intervals
+      .filter((i) => i.driver_number === rivalDriver && i.interval != null)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const step = Math.max(1, Math.ceil(raw.length / 150));
+    return raw.filter((_, i) => i % step === 0).map((i) => ({
+      ms: new Date(i.date).getTime(),
+      t: new Date(i.date).toLocaleTimeString([], { hour12: false }),
+      gap: i.interval!,
+    }));
+  }, [bundle, rivalDriver, refDriver]);
+
+  // Union both spines by timestamp; missing side = null (Recharts skips nulls).
+  const chartData = useMemo<GapPoint[]>(() => {
+    if (rivalSeries.length === 0) {
+      return series.map((p) => ({ ms: p.ms, t: p.t, gap: p.gap, rivalGap: null }));
+    }
+    const byMs = new Map<number, GapPoint>();
+    for (const p of series) byMs.set(p.ms, { ms: p.ms, t: p.t, gap: p.gap, rivalGap: null });
+    for (const p of rivalSeries) {
+      const e = byMs.get(p.ms);
+      if (e) e.rivalGap = p.gap;
+      else byMs.set(p.ms, { ms: p.ms, t: p.t, gap: null, rivalGap: p.gap });
+    }
+    return [...byMs.values()].sort((a, b) => a.ms - b.ms);
+  }, [series, rivalSeries]);
+
+  const refRow = bundle.drivers.find((d) => d.driver_number === refDriver);
+  const rivalRow = bundle.drivers.find((d) => d.driver_number === rivalDriver);
+  const refName = refRow ? nameOfDriver(refRow) : "—";
+  const rivalName = rivalRow ? nameOfDriver(rivalRow) : "—";
+  const showRival = rivalSeries.length > 0 && rivalDriver !== refDriver;
+  const rivalMissing = rivalDriver != null && rivalDriver !== refDriver && rivalSeries.length === 0;
 
   return (
     <section className="space-y-4">
@@ -270,7 +310,7 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
           </Select>
         </div>
         <div className="space-y-1">
-          <label className="text-muted-foreground text-sm">vs. (context)</label>
+          <label className="text-muted-foreground text-sm">Compare driver</label>
           <Select
             value={rivalDriver != null ? String(rivalDriver) : undefined}
             onValueChange={(v) => setRivalDriver(v ? +v : null)}
@@ -279,18 +319,21 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
               <SelectValue placeholder="—" />
             </SelectTrigger>
             <SelectContent>
-              {bundle.drivers.map((d) => (
-                <SelectItem key={d.driver_number} value={String(d.driver_number)}>
-                  {nameOfDriver(d)}
-                </SelectItem>
-              ))}
+              {/* exclude the ref driver — identical selection is meaningless */}
+              {bundle.drivers
+                .filter((d) => d.driver_number !== refDriver)
+                .map((d) => (
+                  <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+                    {nameOfDriver(d)}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
         </div>
       </div>
       <p className="muted small">Gap to the car ahead (intervals). Negative = behind / being lapped.</p>
       <ChartCard title="Gap to Car Ahead" height={chartHeight}>
-        <LineChart data={series}>
+        <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="t" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" minTickGap={60} />
           <YAxis tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
@@ -302,9 +345,16 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
             // ponytail: interval is seconds (not ms) — keep fmtLapTime for m:ss, sign prefix for lapped gaps.
             formatter={(v) => (typeof v === "number" ? (v < 0 ? `-${fmtLapTime(-v)}` : fmtLapTime(v)) : "—")}
           />
-          <Line dataKey="gap" name="Gap" dot={false} strokeWidth={2} stroke="var(--chart-4)" />
+          <Line dataKey="gap" name={refName} dot={false} strokeWidth={2} stroke="var(--chart-4)" />
+          {showRival && (
+            <Line dataKey="rivalGap" name={rivalName} dot={false} strokeWidth={1.5} stroke="var(--chart-1)" />
+          )}
+          <Legend wrapperStyle={{ fontSize: 11 }} />
         </LineChart>
       </ChartCard>
+      {rivalMissing && (
+        <p className="text-muted-foreground text-sm">No interval data for {rivalName}</p>
+      )}
     </section>
   );
 };

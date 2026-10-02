@@ -1,11 +1,51 @@
-// Two-tier cache: cheap resources (meetings, sessions, drivers, laps...) go to
-// localStorage per key; heavy/derived stuff stays in-memory per session lifetime.
-// ponytail: no TTL — OpenF1 data is immutable once a season ends. Upgrade:
-// version the key or add a max-rows guard if localStorage approaches 5MB.
+// Two-tier cache for OpenF1 responses.
+// - in-memory Map: always, session lifetime
+// - localStorage: only when persist && serialized < 500 KB, entry shape {d,f}
+// Keys are versioned (gridlens:v2:…) so old openf1:* / v1 entries never mix
+// with the new shape — legacy keys are purged on module init.
+// ponytail: revalidate-on-expiry only (no SWR) — fits the bundle-load +
+// skeleton architecture; add stale-while-revalidate if skeleton flashes annoy.
 
-const LS_PREFIX = "openf1:";
+const LS_PREFIX = "gridlens:v2:openf1:";
+const LEGACY_PREFIXES = ["openf1:", "gridlens:"]; // anything not LS_PREFIX
 
-const mem = new Map<string, unknown>();
+export const CURRENT_SEASON_TTL_MS = 15 * 60 * 1000;
+
+export type CacheStatus = "completed" | "in-progress" | "live";
+export interface CachePolicy {
+  ttlMs: number; // 0 = never expires
+  persist: boolean; // false = memory-only, refetch every call
+}
+
+// Caller-side classification — no hardcoded years in the policy itself.
+export const classifySeason = (year: number, live = false): CacheStatus =>
+  live ? "live" : year >= new Date().getFullYear() ? "in-progress" : "completed";
+
+export const getCachePolicy = (_year: number, status: CacheStatus): CachePolicy => {
+  if (status === "live") return { ttlMs: 0, persist: false };
+  if (status === "in-progress") return { ttlMs: CURRENT_SEASON_TTL_MS, persist: true };
+  return { ttlMs: 0, persist: true };
+};
+
+const mem = new Map<string, { d: unknown; f: number }>();
+const inflight = new Map<string, Promise<unknown>>();
+
+// Purge unversioned openf1:* and v1 gridlens:* keys once per load.
+const purgeLegacyKeys = () => {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const dead: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || k.startsWith(LS_PREFIX)) continue;
+      if (LEGACY_PREFIXES.some((p) => k.startsWith(p))) dead.push(k);
+    }
+    dead.forEach((k) => localStorage.removeItem(k));
+  } catch {
+    /* no-op when localStorage absent/broken */
+  }
+};
+purgeLegacyKeys();
 
 export const cacheKey = (resource: string, ops: Record<string, string | number | boolean | any[]>) => {
   const sorted = Object.entries(ops)
@@ -15,33 +55,67 @@ export const cacheKey = (resource: string, ops: Record<string, string | number |
   return `${LS_PREFIX}${resource}?${sorted}`;
 };
 
-export const getCached = <T>(resource: string, ops: Record<string, string | number | boolean | any[]>) => {
+const isFresh = (e: { f: number }, ttlMs: number) => ttlMs === 0 || Date.now() - e.f < ttlMs;
+
+const getCachedEntry = <T>(resource: string, ops: Record<string, string | number | boolean | any[]>, ttlMs: number): T[] | undefined => {
   const key = cacheKey(resource, ops);
-  if (mem.has(key)) return mem.get(key) as T;
+  const m = mem.get(key);
+  if (m && isFresh(m, ttlMs)) return m.d as T[];
   try {
     const raw = localStorage.getItem(key);
     if (raw) {
-      const parsed = JSON.parse(raw) as T;
-      mem.set(key, parsed);
-      return parsed;
+      const parsed = JSON.parse(raw) as { d: T[]; f: number };
+      if (parsed && typeof parsed.f === "number" && "d" in parsed) {
+        if (isFresh(parsed, ttlMs)) {
+          mem.set(key, parsed);
+          return parsed.d;
+        }
+        // stale — leave LS entry; setCached overwrites after refetch
+        mem.delete(key);
+        return undefined;
+      }
     }
   } catch {
-    /* corrupt entry — fall through to network */
+    // corrupt — purge so the next write starts clean; never throw
+    try { localStorage.removeItem(key); } catch { /* ignore */ }
   }
+  mem.delete(key);
   return undefined;
 };
 
-export const setCached = (resource: string, ops: Record<string, string | number | boolean | any[]>, data: unknown) => {
+// Cached fetcher: fresh hit → return; otherwise one shared request per key
+// (in-flight dedupe protects StrictMode double-invokes + concurrent callers).
+// live policy skips both tiers and refetches every call (dedupe concurrent only).
+export const cached = async <T>(
+  resource: string,
+  ops: Record<string, string | number | boolean | any[]>,
+  fn: () => Promise<T[]>,
+  policy: CachePolicy,
+): Promise<T[]> => {
   const key = cacheKey(resource, ops);
-  mem.set(key, data);
-  const json = JSON.stringify(data);
-  // ponytail: heavy resources (e.g. intervals ≈ 4MB/race) stay in-memory only;
-  // they'd otherwise eat the whole ~5MB localStorage quota on the first race.
-  if (json.length < 500_000) {
-    try {
-      localStorage.setItem(key, json);
-    } catch {
-      /* quota exceeded — memory cache still works */
-    }
+  if (policy.persist) {
+    const hit = getCachedEntry<T>(resource, ops, policy.ttlMs);
+    if (hit) return hit;
   }
+  const pending = inflight.get(key) as Promise<T[]> | undefined;
+  if (pending) return pending;
+  const p = (async () => {
+    const data = await fn();
+    if (policy.persist) {
+      const f = Date.now();
+      mem.set(key, { d: data, f });
+      const json = JSON.stringify({ d: data, f });
+      // ponytail: heavy resources (intervals ≈ 4 MB/race) stay memory-only;
+      // they'd otherwise eat the whole ~5 MB localStorage quota on the first race.
+      if (json.length < 500_000) {
+        try { localStorage.setItem(key, json); } catch { /* quota exceeded — mem still works */ }
+      }
+    }
+    return data;
+  })().finally(() => { inflight.delete(key); });
+  inflight.set(key, p);
+  return p;
 };
+
+// test-only: scripts/cache-check.mjs — clears mem + inflight between scenarios
+export const __resetCacheForTests = () => { mem.clear(); inflight.clear(); };

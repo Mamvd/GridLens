@@ -3,21 +3,13 @@ import {
   type Driver, type Lap, type Interval, type Stint, type PitEvent,
   type SessionResult, type Overtake, type StartingGrid,
 } from "../api/openf1";
-import { getCached, setCached } from "../api/cache";
+import { cached, classifySeason, getCachePolicy } from "../api/cache";
 
 // ponytail: API has no display-name field — compose first+last; keep one helper,
 // add shared formatter in lib/ if a third call site needs styling.
 export const nameOfDriver = (d: Driver): string => `${d.first_name} ${d.last_name}`;
 
 // --- fetch helpers (cached cheap resources) ---
-
-const cached = async <T>(resource: string, ops: Parameters<typeof getCached>[1], fn: () => Promise<T[]>) => {
-  const hit = getCached<T[]>(resource, ops);
-  if (hit) return hit;
-  const data = await fn();
-  setCached(resource, ops, data);
-  return data;
-};
 
 export interface RaceBundle {
   sessionKey: number;
@@ -34,23 +26,30 @@ export interface RaceBundle {
 
 export const loadRaceBundle = async (
   sessionKey: number,
+  year?: number,
+  live?: boolean,
 ): Promise<RaceBundle> => {
+  // ponytail: default in-progress when year omitted — short TTL is the safe
+  // default for unknown recency. Upgrade path = pass the actual session
+  // date_end from the session rows already in memory to detect live precisely.
+  const status = live ? "live" : year == null ? "in-progress" : classifySeason(year);
+  const policy = getCachePolicy(year ?? new Date().getFullYear(), status);
     const [drivers, laps, intervals, stints, pitEvents, results, overtakes, grid] =
     await Promise.all([
       cached<Driver>("drivers", { session_key: sessionKey }, () =>
-        getOpenF1<Driver>("drivers", { session_key: sessionKey })),
+        getOpenF1<Driver>("drivers", { session_key: sessionKey }), policy),
       cached<Lap>("laps", { session_key: sessionKey }, () =>
-        getOpenF1<Lap>("laps", { session_key: sessionKey })),
+        getOpenF1<Lap>("laps", { session_key: sessionKey }), policy),
       cached<Interval>("intervals", { session_key: sessionKey }, () =>
-        getOpenF1<Interval>("intervals", { session_key: sessionKey })),
+        getOpenF1<Interval>("intervals", { session_key: sessionKey }), policy),
       cached<Stint>("stints", { session_key: sessionKey }, () =>
-        getOpenF1<Stint>("stints", { session_key: sessionKey })),
+        getOpenF1<Stint>("stints", { session_key: sessionKey }), policy),
       cached<PitEvent>("pit", { session_key: sessionKey }, () =>
-        getOpenF1<PitEvent>("pit", { session_key: sessionKey })),
+        getOpenF1<PitEvent>("pit", { session_key: sessionKey }), policy),
       cached<SessionResult>("session_result", { session_key: sessionKey }, () =>
-        getOpenF1<SessionResult>("session_result", { session_key: sessionKey })),
+        getOpenF1<SessionResult>("session_result", { session_key: sessionKey }), policy),
       cached<Overtake>("overtakes", { session_key: sessionKey }, () =>
-        getOpenF1<Overtake>("overtakes", { session_key: sessionKey })),
+        getOpenF1<Overtake>("overtakes", { session_key: sessionKey }), policy),
       (async () => {
         // starting_grid occasionally errors on older data — don't sink the bundle
         try {

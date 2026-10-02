@@ -2,15 +2,11 @@ import {
   getOpenF1,
   type Meeting, type Session, type SessionResult,
 } from "../api/openf1";
-import { getCached, setCached } from "../api/cache";
+import { cached, classifySeason, getCachePolicy } from "../api/cache";
 
-const cached = async <T>(resource: string, ops: Record<string, string | number | boolean | any[]>, fn: () => Promise<T[]>) => {
-  const hit = getCached<T[]>(resource, ops);
-  if (hit) return hit;
-  const data = await fn();
-  setCached(resource, ops, data);
-  return data;
-};
+// Season-scoped cache policy: completed years persist forever; the current
+// year uses a short TTL + revalidate-on-expiry (see api/cache.ts).
+const seasonPolicy = (year: number) => getCachePolicy(year, classifySeason(year));
 
 export interface SeasonPitStop {
   driver_number: number;
@@ -44,17 +40,17 @@ export const seasonMeetings = (year: number) =>
   cached<Meeting>("meetings", { year }, async () => {
     const all = await getOpenF1<Meeting>("meetings", { year });
     return all.filter((m) => m.meeting_name.includes("Grand Prix"));
-  });
+  }, seasonPolicy(year));
 
 // Race sessions for the whole year in one query (sessions?year=N works).
 export const seasonRaceSessions = (year: number) =>
   cached<Session>("sessions", { year, session_name: "Race" }, () =>
-    getOpenF1<Session>("sessions", { year, session_name: "Race" }));
+    getOpenF1<Session>("sessions", { year, session_name: "Race" }), seasonPolicy(year));
 
 // Sprint sessions (6 per season) — points-scoring, separate from seasonRaceSessions.
 export const seasonSprintSessions = (year: number) =>
   cached<Session>("sessions", { year, session_name: "Sprint" }, () =>
-    getOpenF1<Session>("sessions", { year, session_name: "Sprint" }));
+    getOpenF1<Session>("sessions", { year, session_name: "Sprint" }), seasonPolicy(year));
 
 export interface SeasonPoint {
   meetingKey: number;
@@ -98,13 +94,13 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     // as long as ≥1 key has rows — ponytail: future/empty sessions
     // contribute zero rows via the `?? []` below, no special-casing.
     cached<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }, () =>
-      getOpenF1<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] })),
+      getOpenF1<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }), seasonPolicy(year)),
     cached<SeasonPitStop>("pit", { session_key: sks }, () =>
-      getOpenF1<SeasonPitStop>("pit", { session_key: sks })),
+      getOpenF1<SeasonPitStop>("pit", { session_key: sks }), seasonPolicy(year)),
     cached<SeasonStint>("stints", { session_key: sks }, () =>
-      getOpenF1<SeasonStint>("stints", { session_key: sks })),
+      getOpenF1<SeasonStint>("stints", { session_key: sks }), seasonPolicy(year)),
     cached<RaceDriver>("drivers", { session_key: sks }, () =>
-      getOpenF1<RaceDriver>("drivers", { session_key: sks })),
+      getOpenF1<RaceDriver>("drivers", { session_key: sks }), seasonPolicy(year)),
   ]);
   const bySession = <T extends { session_key: number }>(rows: T[]) => {
     const m = new Map<number, T[]>();

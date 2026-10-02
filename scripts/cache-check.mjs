@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+// cache-check.mjs — asserts for src/api/cache.ts: policy, TTL revalidate,
+// corrupt-entry recovery, in-flight dedupe, legacy-key purge.
+// Recipe: tsc cache.ts → CJS, stub localStorage on globalThis, then require.
+
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import assert from "node:assert";
+import { rmSync, mkdirSync } from "node:fs";
+
+const OUT = "/tmp/cachecheck";
+rmSync(OUT, { recursive: true, force: true });
+mkdirSync(OUT, { recursive: true });
+execFileSync("node_modules/.bin/tsc", [
+  "src/api/cache.ts",
+  "--ignoreConfig", "--ignoreDeprecations", "6.0",
+  "--module", "commonjs", "--target", "es2022",
+  "--esModuleInterop", "--skipLibCheck",
+  "--rootDir", "src", "--outDir", OUT,
+], { stdio: "inherit" });
+
+// Map-backed localStorage stub — supports the methods cache.ts touches.
+const store = new Map();
+globalThis.localStorage = {
+  get length() { return store.size; },
+  key: (i) => [...store.keys()][i] ?? null,
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => { store.set(k, String(v)); },
+  removeItem: (k) => { store.delete(k); },
+};
+
+// Seed legacy keys BEFORE require — module init must purge both families.
+store.set("openf1:meetings?year=2023", JSON.stringify([{ old: true }]));
+store.set("gridlens:openf1:drivers?session_key=1", JSON.stringify([{ old: true }]));
+
+const require = createRequire(import.meta.url);
+const {
+  cached, cacheKey, getCachePolicy, classifySeason,
+  CURRENT_SEASON_TTL_MS, __resetCacheForTests,
+} = require(`${OUT}/api/cache.js`);
+
+let fetches = 0;
+const mkFn = (tag) => async () => {
+  fetches++;
+  await new Promise((r) => setTimeout(r, 5));
+  return [{ tag, n: fetches }];
+};
+
+let failed = 0;
+const check = async (name, fn) => {
+  try {
+    await fn();
+    console.log(`PASS ${name}`);
+  } catch (e) {
+    failed++;
+    console.log(`FAIL ${name}: ${e.message}`);
+  }
+};
+
+const nowYear = new Date().getFullYear();
+
+await check("legacy keys purged on init", () => {
+  assert.equal(store.has("openf1:meetings?year=2023"), false, "old openf1:* key survived");
+  assert.equal(store.has("gridlens:openf1:drivers?session_key=1"), false, "v1 gridlens:* key survived");
+});
+
+await check("policy: completed → persistent, ttl 0", () => {
+  assert.equal(classifySeason(2023), "completed");
+  const p = getCachePolicy(2023, "completed");
+  assert.equal(p.persist, true);
+  assert.equal(p.ttlMs, 0);
+});
+
+await check("policy: current year → in-progress, CURRENT_SEASON_TTL_MS", () => {
+  assert.equal(classifySeason(nowYear), "in-progress");
+  const p = getCachePolicy(nowYear, "in-progress");
+  assert.equal(p.persist, true);
+  assert.equal(p.ttlMs, CURRENT_SEASON_TTL_MS);
+});
+
+await check("policy: live → no persist, refetch every call", async () => {
+  assert.equal(classifySeason(nowYear, true), "live");
+  const p = getCachePolicy(nowYear, "live");
+  assert.equal(p.persist, false);
+  assert.equal(p.ttlMs, 0);
+  __resetCacheForTests();
+  store.clear();
+  fetches = 0;
+  await cached("drivers", { session_key: 42 }, mkFn("live"), p);
+  await cached("drivers", { session_key: 42 }, mkFn("live"), p);
+  assert.equal(fetches, 2, "live policy must refetch every call");
+  assert.equal(store.size, 0, "live policy must not write localStorage");
+});
+
+await check("TTL: young hit / stale refetch (in-progress)", async () => {
+  __resetCacheForTests();
+  store.clear();
+  fetches = 0;
+  const ops = { session_key: 101 };
+  const policy = getCachePolicy(nowYear, "in-progress");
+  const key = cacheKey("laps", ops);
+  await cached("laps", ops, mkFn("ttl"), policy);
+  assert.equal(fetches, 1);
+  await cached("laps", ops, mkFn("ttl"), policy);
+  assert.equal(fetches, 1, "young entry must hit cache");
+  // age LS entry past TTL, clear mem → must refetch
+  __resetCacheForTests();
+  const raw = JSON.parse(store.get(key));
+  store.set(key, JSON.stringify({ ...raw, f: Date.now() - CURRENT_SEASON_TTL_MS - 1000 }));
+  await cached("laps", ops, mkFn("ttl"), policy);
+  assert.equal(fetches, 2, "stale entry must refetch");
+});
+
+await check("TTL: completed never expires even when ancient", async () => {
+  __resetCacheForTests();
+  store.clear();
+  fetches = 0;
+  const ops = { session_key: 202 };
+  const key = cacheKey("pit", ops);
+  const done = getCachePolicy(2023, "completed");
+  await cached("pit", ops, mkFn("done"), done);
+  assert.equal(fetches, 1);
+  __resetCacheForTests();
+  const raw = JSON.parse(store.get(key));
+  store.set(key, JSON.stringify({ ...raw, f: Date.now() - 365 * 24 * 3600 * 1000 }));
+  await cached("pit", ops, mkFn("done"), done);
+  assert.equal(fetches, 1, "completed entries must not refetch on age");
+});
+
+await check("corrupt LS entry → refetch, no crash, garbage replaced", async () => {
+  __resetCacheForTests();
+  store.clear();
+  fetches = 0;
+  const ops = { session_key: 303 };
+  const key = cacheKey("stints", ops);
+  store.set(key, "{this is not json{{{");
+  const policy = getCachePolicy(nowYear, "in-progress");
+  const data = await cached("stints", ops, mkFn("corrupt"), policy);
+  assert.equal(fetches, 1, "corrupt entry must miss cache");
+  assert.equal(data[0].tag, "corrupt");
+  const parsed = JSON.parse(store.get(key));
+  assert.equal(typeof parsed.f, "number", "replacement must be {d,f} shape");
+  assert.ok(Array.isArray(parsed.d));
+});
+
+await check("concurrent same-key calls → exactly 1 fetch", async () => {
+  __resetCacheForTests();
+  store.clear();
+  fetches = 0;
+  const ops = { session_key: 404 };
+  const policy = getCachePolicy(nowYear, "in-progress");
+  const [a, b] = await Promise.all([
+    cached("drivers", ops, mkFn("c"), policy),
+    cached("drivers", ops, mkFn("c"), policy),
+  ]);
+  assert.equal(fetches, 1, "in-flight dedupe must share one request");
+  assert.deepEqual(a, b);
+});
+
+if (failed) {
+  console.log(`\n${failed} scenario(s) FAILED`);
+  process.exit(1);
+}
+console.log("\nALL PASS");

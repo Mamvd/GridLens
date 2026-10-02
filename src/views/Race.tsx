@@ -63,7 +63,7 @@ export const Race = ({ meeting }: Props) => {
         if (!alive) return;
         const race = sessions.find((s) => s.meeting_key === meeting.meeting_key);
         if (!race) { setError("No race session found for this meeting."); return; }
-        loadRaceBundle(race.session_key)
+        loadRaceBundle(race.session_key, meeting.year)
           .then((b) => {
             if (!alive) return;
             setBundle(b);

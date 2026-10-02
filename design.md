@@ -1,4 +1,4 @@
-# Design System — F1 Season & Race Explorer
+# Design System — GridLens
 
 Single source of truth for rebuilding any view. Dark-first, data-dense, one accent.
 

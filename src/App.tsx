@@ -23,7 +23,8 @@ export default function App() {
     <div className="dark min-h-screen bg-background text-foreground flex flex-col">
       <header className="sticky top-0 z-10 border-b bg-card/80 backdrop-blur supports-[backdrop-filter]:bg-card/80">
         <div className="mx-auto flex max-w-[1100px] items-center gap-3 px-5 py-3">
-          <h1 className="text-[17px] font-semibold tracking-tight">F1 Season &amp; Race Explorer</h1>
+          <h1 className="text-[17px] font-semibold tracking-tight">GridLens</h1>
+          <span className="text-xs text-muted-foreground">F1 Season & Race Explorer</span>
           <Badge variant="secondary" className="ml-1 hidden sm:inline-flex">{year}</Badge>
           <div className="ml-auto flex items-center gap-2">
             <span className="text-xs text-muted-foreground hidden sm:inline">Season</span>

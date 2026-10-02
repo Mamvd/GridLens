@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-F1 Season & Race Explorer — a pure-frontend web dashboard built on [OpenF1](https://openf1.org/docs/) data. **No backend**: the browser fetches `api.openf1.org` directly (CORS is `*`), cheap resources cache to localStorage, heavy ones stay in memory.
+GridLens — F1 Season & Race Explorer — a pure-frontend web dashboard built on [OpenF1](https://openf1.org/docs/) data. **No backend**: the browser fetches `api.openf1.org` directly (CORS is `*`), cheap resources cache to localStorage, heavy ones stay in memory.
 
 Stack: Vite + React 19 + TypeScript, Recharts for all charts. No router — views switch on state in `App.tsx` (season ↔ race). No test framework; verification is done headlessly with Playwright + system chromium (`/usr/bin/chromium-browser`).
 

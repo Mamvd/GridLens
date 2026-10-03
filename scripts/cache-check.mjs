@@ -230,8 +230,8 @@ await check("LIVE_DATA_ENABLED=false gates live=true → in-progress persist, no
     "--esModuleInterop", "--skipLibCheck",
     "--rootDir", "src", "--outDir", RACE_OUT,
   ], { cwd: ROOT, stdio: "inherit" });
-  const { loadRaceBundle } = require(`${RACE_OUT}/data/race.js`);
-  assert.equal(typeof loadRaceBundle, "function", "loadRaceBundle export missing");
+  const { loadRaceBase } = require(`${RACE_OUT}/data/race.js`);
+  assert.equal(typeof loadRaceBase, "function", "loadRaceBase export missing");
 
   // mock global fetch — openf1 limiter (pLimit 4 + 500 ms spacing) still runs
   const fetchLog = [];
@@ -245,16 +245,17 @@ await check("LIVE_DATA_ENABLED=false gates live=true → in-progress persist, no
   __resetCacheForTests();
   store.clear();
   const sk = 990001;
-  const b1 = await loadRaceBundle(sk, nowYear, true); // live=true, flag off
-  assert.ok(b1, "bundle loads");
-  assert.equal(b1.sessionKey, sk);
+  const b1 = await loadRaceBase(sk, nowYear, true); // live=true, flag off
+  assert.ok(b1, "loadRaceBase loads");
+  assert.ok(b1.drivers, "drivers present");
+  assert.ok(b1.results, "results present");
   // in-progress path persists to localStorage; live path would leave LS empty
   const dKey = cacheKey("drivers", { session_key: sk });
   assert.ok(store.has(dKey), "live=true with flag off must take in-progress persist path");
   const n1 = countDrivers();
   assert.equal(n1, 1, "first call fetches drivers once");
   // second call: in-progress TTL → cache hit; live path would refetch every call
-  await loadRaceBundle(sk, nowYear, true);
+  await loadRaceBase(sk, nowYear, true);
   const n2 = countDrivers();
   assert.equal(n2, 1, "second call must cache-hit — live refetch path not taken");
 });

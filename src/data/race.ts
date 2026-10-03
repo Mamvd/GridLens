@@ -94,47 +94,6 @@ export const TAB_RESOURCES: Record<TabName, readonly RaceResKey[]> = {
 export const missingResources = (tab: TabName, has: (k: RaceResKey) => boolean): RaceResKey[] =>
   (TAB_RESOURCES[tab] ?? []).filter((k) => !has(k));
 
-export const loadRaceBundle = async (
-  sessionKey: number,
-  year?: number,
-  live?: boolean,
-  opts?: { signal?: AbortSignal },
-): Promise<RaceBundle> => {
-  const [base, lapsRes, intervalsRes, stintsRes, pitRes, overtakesRes, grid] =
-    await Promise.all([
-      loadRaceBase(sessionKey, year, live, opts),
-      loadLaps(sessionKey, year, live, opts),
-      loadIntervals(sessionKey, year, live, opts),
-      loadStints(sessionKey, year, live, opts),
-      loadPit(sessionKey, year, live, opts),
-      loadOvertakes(sessionKey, year, live, opts),
-      (async () => {
-        // starting_grid occasionally errors on older data — don't sink the bundle
-        try {
-          return await getOpenF1<StartingGrid>("starting_grid", { session_key: sessionKey }, opts);
-        } catch {
-          return [] as StartingGrid[];
-        }
-      })(),
-    ]);
-
-  const numberToDriver = new Map(base.drivers.map((d) => [d.driver_number, d]));
-  return {
-    sessionKey,
-    drivers: base.drivers,
-    results: base.results,
-    laps: lapsRes.data,
-    intervals: intervalsRes.data,
-    stints: stintsRes.data,
-    pitEvents: pitRes.data,
-    overtakes: overtakesRes.data,
-    grid,
-    numberToDriver,
-    stale: base.stale || lapsRes.stale || intervalsRes.stale || stintsRes.stale
-      || pitRes.stale || overtakesRes.stale,
-  };
-};
-
 // --- derived analytics ---
 
 export interface DriverStrategy {

@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import {
   loadRaceBundle, computeStrategies, driverLapsForSectors, fmtLapTime,
-  nameOfDriver, raceIsUnrun,
+  nameOfDriver, raceIsUnrun, parseInterval, fmtInterval,
   type RaceBundle,
 } from "../data/race";
 import type { Meeting } from "../api/openf1";
@@ -260,7 +260,13 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
 };
 
 // ---- Gaps: interval trace for a driver (gap to car ahead) ----
-type GapPoint = { ms: number; t: string; gap: number | null; rivalGap: number | null };
+// gap is numeric seconds for "time" intervals only — lapped/leader → null so
+// Recharts breaks the line instead of plotting a fabricated axis number.
+type GapPoint = {
+  ms: number; t: string;
+  gap: number | null; gapLabel: string;
+  rivalGap: number | null; rivalGapLabel: string;
+};
 
 const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver, chartHeight }: {
   bundle: RaceBundle; refDriver: number | null; rivalDriver: number | null;
@@ -270,13 +276,17 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
   const series = useMemo(() => {
     if (refDriver == null) return [];
     const raw = bundle.intervals
-      .filter((i) => i.driver_number === refDriver && i.interval != null)
+      .filter((i) => i.driver_number === refDriver)
+      .map((i) => ({ date: i.date, v: parseInterval(i.interval) }))
+      // drop only "none" — lapped/leader stay in the spine as line gaps
+      .filter((x) => x.v.type !== "none")
       .sort((a, b) => a.date.localeCompare(b.date));
     const step = Math.max(1, Math.ceil(raw.length / 150));
-    return raw.filter((_, i) => i % step === 0).map((i) => ({
-      ms: new Date(i.date).getTime(),
-      t: new Date(i.date).toLocaleTimeString([], { hour12: false }),
-      gap: i.interval!,
+    return raw.filter((_, i) => i % step === 0).map((x) => ({
+      ms: new Date(x.date).getTime(),
+      t: new Date(x.date).toLocaleTimeString([], { hour12: false }),
+      gap: x.v.type === "time" ? x.v.seconds : null, // lapped/leader → null → line gap
+      gapLabel: fmtInterval(x.v),
     }));
   }, [bundle, refDriver]);
 
@@ -285,27 +295,41 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
   const rivalSeries = useMemo(() => {
     if (rivalDriver == null || rivalDriver === refDriver) return [];
     const raw = bundle.intervals
-      .filter((i) => i.driver_number === rivalDriver && i.interval != null)
+      .filter((i) => i.driver_number === rivalDriver)
+      .map((i) => ({ date: i.date, v: parseInterval(i.interval) }))
+      .filter((x) => x.v.type !== "none")
       .sort((a, b) => a.date.localeCompare(b.date));
     const step = Math.max(1, Math.ceil(raw.length / 150));
-    return raw.filter((_, i) => i % step === 0).map((i) => ({
-      ms: new Date(i.date).getTime(),
-      t: new Date(i.date).toLocaleTimeString([], { hour12: false }),
-      gap: i.interval!,
+    return raw.filter((_, i) => i % step === 0).map((x) => ({
+      ms: new Date(x.date).getTime(),
+      t: new Date(x.date).toLocaleTimeString([], { hour12: false }),
+      gap: x.v.type === "time" ? x.v.seconds : null,
+      gapLabel: fmtInterval(x.v),
     }));
   }, [bundle, rivalDriver, refDriver]);
+
+  // lapped intervals on the FULL spine (before downsample) — powers the note
+  // below the chart so +N LAP values are stated even when stride drops points.
+  const lapped = useMemo(() => {
+    if (refDriver == null) return { count: 0, labels: [] as string[] };
+    const vals = bundle.intervals
+      .filter((i) => i.driver_number === refDriver)
+      .map((i) => parseInterval(i.interval))
+      .filter((v) => v.type === "lapped");
+    return { count: vals.length, labels: [...new Set(vals.map(fmtInterval))] };
+  }, [bundle, refDriver]);
 
   // Union both spines by timestamp; missing side = null (Recharts skips nulls).
   const chartData = useMemo<GapPoint[]>(() => {
     if (rivalSeries.length === 0) {
-      return series.map((p) => ({ ms: p.ms, t: p.t, gap: p.gap, rivalGap: null }));
+      return series.map((p) => ({ ...p, rivalGap: null, rivalGapLabel: "" }));
     }
     const byMs = new Map<number, GapPoint>();
-    for (const p of series) byMs.set(p.ms, { ms: p.ms, t: p.t, gap: p.gap, rivalGap: null });
+    for (const p of series) byMs.set(p.ms, { ...p, rivalGap: null, rivalGapLabel: "" });
     for (const p of rivalSeries) {
       const e = byMs.get(p.ms);
-      if (e) e.rivalGap = p.gap;
-      else byMs.set(p.ms, { ms: p.ms, t: p.t, gap: null, rivalGap: p.gap });
+      if (e) { e.rivalGap = p.gap; e.rivalGapLabel = p.gapLabel; }
+      else byMs.set(p.ms, { ms: p.ms, t: p.t, gap: null, gapLabel: "", rivalGap: p.gap, rivalGapLabel: p.gapLabel });
     }
     return [...byMs.values()].sort((a, b) => a.ms - b.ms);
   }, [series, rivalSeries]);
@@ -371,7 +395,8 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
             labelStyle={chartTooltip.labelStyle}
             itemStyle={chartTooltip.itemStyle}
             cursor={chartTooltip.cursor}
-            // ponytail: interval is seconds (not ms) — keep fmtLapTime for m:ss, sign prefix for lapped gaps.
+            // numeric = time-interval seconds (not ms); lapped/leader are null → "—".
+            // ponytail: keep fmtLapTime for m:ss, sign prefix for negative gaps.
             formatter={(v) => (typeof v === "number" ? (v < 0 ? `-${fmtLapTime(-v)}` : fmtLapTime(v)) : "—")}
           />
           <Line dataKey="gap" name={refName} dot={false} strokeWidth={2} stroke="var(--chart-4)" />
@@ -381,6 +406,11 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
           <Legend wrapperStyle={{ fontSize: 11 }} />
         </LineChart>
       </ChartCard>
+      <p className="text-muted-foreground text-xs">
+        ◦ Line gaps mark lapped or no-gap intervals
+        {lapped.count > 0 &&
+          ` — Lapped sections shown as gaps: ${lapped.count} interval${lapped.count === 1 ? "" : "s"} ${lapped.count === 1 ? "was" : "were"} ${lapped.labels.join(" / ")}`}
+      </p>
       {rivalMissing && (
         <p className="text-muted-foreground text-sm">No interval data for {rivalName}</p>
       )}

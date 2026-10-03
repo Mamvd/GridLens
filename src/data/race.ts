@@ -170,3 +170,42 @@ export const fmtLapTime = (secs: number | null | undefined): string => {
   const s = secs - m * 60;
   return `${m}:${s.toFixed(3).padStart(6, "0")}`;
 };
+
+// --- interval parsing (single tested boundary for GapsTab) ---
+// free tier verified numbers-only in 2023/2024/2025 races; the string forms
+// below are documented but untestable live — handled defensively, never
+// fabricated: unexpected input collapses to "none".
+
+export type IntervalValue =
+  | { type: "time"; seconds: number }
+  | { type: "lapped"; laps: number }
+  | { type: "leader" }
+  | { type: "none" };
+
+export const parseInterval = (raw: number | string | null | undefined): IntervalValue => {
+  if (raw == null) return { type: "none" };
+  if (typeof raw === "number") return { type: "time", seconds: raw };
+  const t = raw.trim();
+  if (t === "") return { type: "none" };
+  if (/^leader$/i.test(t)) return { type: "leader" };
+  const m = /^\+\s*(\d+)\s*(laps?)$/i.exec(t);
+  if (m) return { type: "lapped", laps: Number(m[1]) };
+  const n = Number(t);
+  if (!Number.isNaN(n)) return { type: "time", seconds: n };
+  return { type: "none" };
+};
+
+export const fmtInterval = (v: IntervalValue): string => {
+  switch (v.type) {
+    case "time": {
+      const s = v.seconds;
+      const sign = s < 0 ? "-" : "";
+      const a = Math.abs(s);
+      const mm = Math.floor(a / 60);
+      return `${sign}${mm}:${(a - mm * 60).toFixed(3).padStart(6, "0")}`;
+    }
+    case "lapped": return `+${v.laps} ${v.laps === 1 ? "LAP" : "LAPS"}`;
+    case "leader": return "Leader";
+    case "none": return "—";
+  }
+};

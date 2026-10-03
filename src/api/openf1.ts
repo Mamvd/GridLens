@@ -156,7 +156,9 @@ export interface Interval {
   session_key: number;
   driver_number: number;
   date: string;
-  interval: number | null;
+  // free tier ships numbers + null only (scanned 2023-2025); docs claim the
+  // string form ("+1 LAP", "Leader") too — parsed defensively at the boundary.
+  interval: number | string | null;
 }
 
 export interface Stint {

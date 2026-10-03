@@ -78,6 +78,44 @@ const REQUIRED: Record<string, string[]> = {
   session_result: ["position", "driver_number"],
   drivers: ["driver_number", "first_name", "last_name"],
   intervals: ["driver_number", "interval"],
+  laps: ["driver_number", "lap_number"], // charts key on lap_number; missing breaks every pace view
+};
+
+// typed-field map: when a key is PRESENT its value must match. Nullable-aware
+// ("number|null" accepts null, rejects string). Absence is still IDENTITY/
+// REQUIRED's job — OpenF1 ships nulls legitimately, so this is not a schema
+// engine. Spec suffix "|null" allows null; base "number|string" allows both.
+const TYPE: Record<string, Record<string, "number" | "string" | "number|null" | "string|null" | "number|string|null">> = {
+  drivers: {
+    driver_number: "number",
+    first_name: "string",
+    last_name: "string",
+    team_name: "string",
+  },
+  session_result: {
+    position: "number|null",
+    points: "number|null",
+  },
+  laps: {
+    lap_number: "number",
+    lap_duration: "number|null",
+    date_start: "string",
+  },
+  intervals: {
+    // string forms ("+1 LAP", "Leader") are documented but rare on free tier
+    interval: "number|string|null",
+  },
+  meetings: { date_start: "string" },
+  sessions: { date_start: "string" },
+};
+
+const typeOk = (spec: string, v: unknown): boolean => {
+  if (v === null) return spec.includes("|null");
+  const base = spec.replace(/\|null$/, "");
+  if (base === "number") return typeof v === "number" && !Number.isNaN(v);
+  if (base === "string") return typeof v === "string";
+  if (base === "number|string") return typeof v === "number" || typeof v === "string";
+  return true;
 };
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
@@ -89,6 +127,7 @@ export const validateRows = <T>(resource: string, rows: unknown): T[] => {
   }
   const idKey = IDENTITY[resource];
   const required = idKey ? [idKey, ...(REQUIRED[resource] ?? [])] : (REQUIRED[resource] ?? []);
+  const types = TYPE[resource];
   const out: T[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -103,6 +142,15 @@ export const validateRows = <T>(resource: string, rows: unknown): T[] => {
     for (const v of Object.values(row)) {
       if (typeof v === "number" ? Number.isNaN(v) : v === "NaN") {
         throw new OpenF1ValidationError(`OpenF1 invalid row ${i} on ${resource}: NaN field`);
+      }
+    }
+    if (types) {
+      for (const [k, spec] of Object.entries(types)) {
+        if (k in row && row[k] !== undefined && !typeOk(spec, row[k])) {
+          throw new OpenF1ValidationError(
+            `OpenF1 invalid row ${i} on ${resource}: bad type for ${k} (expected ${spec})`,
+          );
+        }
       }
     }
     out.push(row as T);

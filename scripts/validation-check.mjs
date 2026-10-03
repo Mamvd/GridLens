@@ -166,6 +166,74 @@ await check("error message safe for String(e) / title attrs", async () => {
   }
 });
 
+await check("type map: valid typed payloads pass (drivers, laps, session_result, meetings)", async () => {
+  mockFetch([{ session_key: 1, driver_number: 44, first_name: "Lewis", last_name: "Hamilton", team_name: "Mercedes" }]);
+  const drivers = await getOpenF1("drivers", { session_key: 1 });
+  assert.equal(drivers[0].team_name, "Mercedes");
+
+  mockFetch([{ session_key: 1, driver_number: 44, lap_number: 3, lap_duration: 92.1, date_start: "2024-05-26T13:00:00" }]);
+  const laps = await getOpenF1("laps", { session_key: 1 });
+  assert.equal(laps[0].lap_duration, 92.1);
+
+  mockFetch([{ session_key: 1, driver_number: 44, position: 1, points: 25 }]);
+  const results = await getOpenF1("session_result", { session_key: 1 });
+  assert.equal(results[0].position, 1);
+
+  mockFetch([{ meeting_key: 1147, meeting_name: "Monaco Grand Prix", year: 2024, date_start: "2024-05-26" }]);
+  const meetings = await getOpenF1("meetings", { year: 2024 });
+  assert.equal(meetings[0].date_start, "2024-05-26");
+});
+
+await check("type map: wrong primitive type rejected (session_result.position string, drivers.team_name number)", async () => {
+  mockFetch([{ session_key: 1, driver_number: 44, position: "1", points: 25 }]);
+  await assert.rejects(
+    () => getOpenF1("session_result", { session_key: 1 }),
+    (e) => isValidationError(e, /session_result: bad type for position \(expected number\|null\)/),
+  );
+  mockFetch([{ session_key: 1, driver_number: 44, first_name: "Lewis", last_name: "Hamilton", team_name: 123 }]);
+  await assert.rejects(
+    () => getOpenF1("drivers", { session_key: 1 }),
+    (e) => isValidationError(e, /drivers: bad type for team_name \(expected string\)/),
+  );
+});
+
+await check("type map: null optional passes (session_result.position/points, laps.lap_duration)", async () => {
+  mockFetch([{ session_key: 1, driver_number: 44, position: null, points: null }]);
+  const results = await getOpenF1("session_result", { session_key: 1 });
+  assert.equal(results[0].position, null);
+
+  mockFetch([{ session_key: 1, driver_number: 44, lap_number: 1, lap_duration: null, date_start: "2024-05-26" }]);
+  const laps = await getOpenF1("laps", { session_key: 1 });
+  assert.equal(laps[0].lap_duration, null);
+});
+
+await check("type map: malformed/missing numeric field rejected (laps.lap_number missing, string lap_duration)", async () => {
+  // missing required numeric → existing REQUIRED path
+  mockFetch([{ session_key: 1, driver_number: 44, lap_duration: 92.1, date_start: "2024-05-26" }]);
+  await assert.rejects(
+    () => getOpenF1("laps", { session_key: 1 }),
+    (e) => isValidationError(e, /laps: missing lap_number/),
+  );
+  // wrong primitive on typed numeric → type map
+  mockFetch([{ session_key: 1, driver_number: 44, lap_number: "3", lap_duration: 92.1, date_start: "2024-05-26" }]);
+  await assert.rejects(
+    () => getOpenF1("laps", { session_key: 1 }),
+    (e) => isValidationError(e, /laps: bad type for lap_number \(expected number\)/),
+  );
+});
+
+await check("type map: interval string form passes (documented '+1 LAP' / 'Leader')", async () => {
+  mockFetch([
+    { session_key: 1, driver_number: 44, date: "2024-05-26", interval: "+1 LAP" },
+    { session_key: 1, driver_number: 1, date: "2024-05-26", interval: "Leader" },
+    { session_key: 1, driver_number: 16, date: "2024-05-26", interval: 0.5 },
+  ]);
+  const rows = await getOpenF1("intervals", { session_key: 1 });
+  assert.equal(rows[0].interval, "+1 LAP");
+  assert.equal(rows[1].interval, "Leader");
+  assert.equal(rows[2].interval, 0.5);
+});
+
 if (failed) {
   console.log(`\n${failed} scenario(s) FAILED`);
   process.exit(1);

@@ -30,6 +30,8 @@ export interface RaceDriver {
   team_name: string;
   driver_number: number;
   session_key: number;
+  // hex "RRGGBB" (sometimes with #); absent on some rows → chart falls back
+  team_colour?: string;
 }
 
 // API sends boolean dnf/dns/dsq; SessionResult type still declares stale is_dnf (always null).
@@ -89,6 +91,9 @@ export interface SeasonCore {
   championship: DriverChampionship[];
   teamChampionship: { team: string; points: number }[];
   progression: SeasonPoint[];
+  // last-seen API team_colour per driver name ("first last"), chronological
+  // walk — missing names mean the chart uses its deterministic fallback
+  driverColours: Record<string, string>;
   stale: boolean;
 }
 
@@ -211,11 +216,16 @@ export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<Se
   const perDriver = new Map<string, DriverChampionship>();
   const lastTeam = new Map<string, string>();
   const teamPts = new Map<string, number>();
+  const colourByName = new Map<string, string>();
   const sessionsChrono = [
     ...perRace.map((p) => ({ date: p.date, meetingKey: p.meetingKey, drivers: p.drivers, results: p.results, sprint: false })),
     ...perSprint.map((p) => ({ date: p.date, meetingKey: p.meetingKey, drivers: p.drivers, results: p.results, sprint: true })),
   ].sort((a, b) => a.date.localeCompare(b.date));
   for (const s of sessionsChrono) {
+    // colour follows the same chronological last-seen walk as the team
+    for (const d of s.drivers) {
+      if (d.team_colour) colourByName.set(`${d.first_name} ${d.last_name}`, d.team_colour);
+    }
     for (const r of s.results.filter((r) => r.driver_number)) {
       // per-session team: that session's drivers row wins; meeting-level race
       // drivers are the fallback when a sprint session has no drivers rows.
@@ -248,6 +258,7 @@ export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<Se
     championship: [...perDriver.values()].sort((a, b) => b.points - a.points),
     teamChampionship: [...teamPts.entries()].map(([team, points]) => ({ team, points })).sort((a, b) => b.points - a.points),
     progression,
+    driverColours: Object.fromEntries(colourByName),
     stale,
   };
 };

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
   BarChart, Bar,
 } from "recharts";
 import {
@@ -11,6 +11,10 @@ import { raceIsUnrun } from "../data/race";
 import type { Meeting } from "../api/openf1";
 import { slugForMeeting } from "../lib/slug";
 import { resourcePhase } from "../lib/resource-state";
+import {
+  chartSelect, teammateDashed, fallbackPalette, ensureVisible,
+  resolveTeamColours, FALLBACK_HUES, type ChartRange,
+} from "../lib/chart-select";
 import { ChartCard, ChartTooltip } from "@/components/charts/ChartCard";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -34,13 +38,6 @@ const AXIS = { stroke: "var(--border)" };
 const TICK = { fontSize: 10, fill: "var(--muted-foreground)" };
 const GRID_PROPS = { stroke: "var(--border)", strokeDasharray: "3 3" };
 
-// ponytail: 5 token hues cycle across the top-10 lines (repeat lap at 0.55
-// opacity) — upgrade path: full categorical palette once >5 series must stay distinct.
-const SERIES = [
-  "var(--chart-1)", "var(--chart-2)", "var(--chart-4)", "var(--chart-5)", "var(--chart-3)",
-];
-
-
 const fmtNum = (v: unknown) => {
   if (v == null) return "—";
   return typeof v === "number" ? v.toLocaleString("en-US") : String(v);
@@ -48,6 +45,27 @@ const fmtNum = (v: unknown) => {
 
 // "Bahrain Grand Prix" → "Bahrain" for axis density.
 const raceTick = (v: string) => v.replace(/\s+Grand Prix$/i, "");
+
+// tooltip: "driver · round · points" (spec format), text tokens only —
+// never the series colour, per dataviz rules.
+const champTip = (props: {
+  active: boolean;
+  label?: string | number;
+  payload: ReadonlyArray<{
+    name?: string | number;
+    value?: number | string | ReadonlyArray<number | string>;
+    payload?: unknown;
+  }>;
+}) => {
+  if (!props.active || !props.payload.length) return null;
+  const row = props.payload[0];
+  const data = (row.payload ?? {}) as { race?: string };
+  return (
+    <div className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-card-foreground shadow-md">
+      {String(row.name ?? "")} · {raceTick(String(data.race ?? props.label ?? ""))} · {fmtNum(row.value)} pts
+    </div>
+  );
+};
 
 const ChartSkeleton = ({ className }: { className?: string }) => (
   <Card className={className}>
@@ -180,23 +198,71 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
     setExtrasRetry((k) => k + 1);
   };
 
-  // cumulative points per driver across the season
+  // cumulative points per driver across the season — full points order;
+  // chart-select applies range/search/isolate on top (no points math change)
   const standingsSeries = useMemo(() => {
     if (!coreData) return { rows: [] as Record<string, number | string>[], names: [] as string[] };
     const perDriver = new Map<string, number>();
-    const rows: Record<string, number | string>[] = [];
-    for (const p of coreData.progression) {
+    const rows = coreData.progression.map((p) => {
       for (const dp of p.racePoints) {
         perDriver.set(dp.name, (perDriver.get(dp.name) ?? 0) + dp.points);
       }
-      const top = [...perDriver.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
       const row: Record<string, number | string> = { race: p.meetingName };
-      top.forEach(([name, pts]) => (row[name] = pts));
-      rows.push(row);
-    }
-    const names = [...perDriver.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([n]) => n);
+      for (const [name, pts] of perDriver) row[name] = pts;
+      return row;
+    });
+    // ponytail: cap at 20 lines ("All" ≈ one F1 grid) — Recharts renders 20
+    // fine unanimated; raise after profiling if backmarker data is wanted.
+    const names = [...perDriver.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([n]) => n);
     return { rows, names };
   }, [coreData]);
+
+  // #15 championship-chart interactions: hover dims, click isolates
+  // (persists until re-click / Show all), legend buttons + search + ranges.
+  const [chartRange, setChartRange] = useState<ChartRange>("top10");
+  const [chartSearch, setChartSearch] = useState("");
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [isolated, setIsolated] = useState<string | null>(null);
+
+  const teamByDriver = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of coreData?.championship ?? []) m.set(d.driverName, d.team);
+    return m;
+  }, [coreData]);
+  const chartEntries = useMemo(
+    () => standingsSeries.names.map((name) => ({ name, team: teamByDriver.get(name) ?? "Unknown" })),
+    [standingsSeries.names, teamByDriver],
+  );
+  const palette = useMemo(() => fallbackPalette(chartEntries.map((e) => e.team)), [chartEntries]);
+  const dashedSet = useMemo(() => teammateDashed(chartEntries), [chartEntries]);
+  const teamHexes = useMemo(
+    () => resolveTeamColours(chartEntries, coreData?.driverColours ?? {}),
+    [chartEntries, coreData],
+  );
+  // API team_colour first (lifted to the dark-surface floor), else the
+  // team's deterministic fallback hue — never a fabricated colour
+  const colourOf = (name: string): string => {
+    const team = teamByDriver.get(name) ?? "Unknown";
+    return ensureVisible(teamHexes[team] ?? "") ?? palette[team] ?? FALLBACK_HUES[0];
+  };
+
+  // stale isolate (e.g. year switch) auto-clears; hidden = everyone else
+  const isolate = isolated != null && standingsSeries.names.includes(isolated) ? isolated : null;
+  const hidden = useMemo<ReadonlySet<string>>(
+    () => (isolate ? new Set(standingsSeries.names.filter((n) => n !== isolate)) : new Set()),
+    [isolate, standingsSeries.names],
+  );
+  const sel = useMemo(
+    () => chartSelect({
+      order: standingsSeries.names,
+      range: chartRange,
+      search: chartSearch,
+      hidden,
+      focus: hovered ?? isolate,
+    }),
+    [standingsSeries.names, chartRange, chartSearch, hidden, hovered, isolate],
+  );
+  const toggleIsolate = (name: string) => setIsolated((iso) => (iso === name ? null : name));
 
   const topTeams = coreReady && coreData ? coreData.teamChampionship.slice(0, 10) : [];
   const topStrategies = (extrasData?.strategyCount ?? []).filter((s) => s.strategy !== "no-data").slice(0, 8);
@@ -266,33 +332,110 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
           onRetry={retryCore} skeleton={<ChartSkeleton />}
           rowCount={coreData?.championship.length ?? 0} emptyMessage="No results yet."
         >
-          <ChartCard title="Drivers' championship" subtitle="Top 10 cumulative points">
-            <LineChart data={standingsSeries.rows}>
-              <CartesianGrid {...GRID_PROPS} />
-              <XAxis
-                dataKey="race"
-                {...AXIS}
-                tick={TICK}
-                interval={1}
-                tickFormatter={raceTick}
+          <>
+            {/* controls stack above the chart and wrap at 320px */}
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={chartSearch}
+                onChange={(e) => setChartSearch(e.target.value)}
+                placeholder="Search driver"
+                aria-label="Search drivers"
+                className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2.5 text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:w-52 sm:flex-none"
               />
-              <YAxis {...AXIS} tick={TICK} width={45} />
-              <ChartTooltip
-                formatter={(value, name) => [fmtNum(value), name]}
-              />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              {standingsSeries.names.map((n, i) => (
-                <Line
-                  key={n}
-                  dataKey={n}
-                  dot={false}
-                  strokeWidth={2}
-                  stroke={SERIES[i % SERIES.length]}
-                  strokeOpacity={i < SERIES.length ? 1 : 0.55}
-                />
-              ))}
-            </LineChart>
-          </ChartCard>
+              <div role="group" aria-label="Range" className="flex h-8 shrink-0 overflow-hidden rounded-md border border-input text-xs">
+                {([["top5", "Top 5"], ["top10", "Top 10"], ["all", "All"]] as const).map(([r, label], i) => (
+                  <button
+                    key={r}
+                    type="button"
+                    aria-pressed={chartRange === r}
+                    onClick={() => setChartRange(r)}
+                    className={`px-2.5 text-muted-foreground hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground${i > 0 ? " border-l border-input" : ""}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {isolate != null && (
+                <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setIsolated(null)}>
+                  Show all
+                </Button>
+              )}
+            </div>
+            {/* legend: real buttons, wraps freely at 320px, text-token labels */}
+            <ul className="mb-2 flex flex-wrap gap-x-1 gap-y-0.5" data-testid="champ-legend">
+              {sel.visible.map((name) => {
+                const c = colourOf(name);
+                const dim = sel.focus != null && sel.focus !== name;
+                return (
+                  <li key={name}>
+                    <button
+                      type="button"
+                      aria-pressed={isolate === name}
+                      aria-label={`Isolate ${name}`}
+                      onMouseEnter={() => setHovered(name)}
+                      onMouseLeave={() => setHovered(null)}
+                      onFocus={() => setHovered(name)}
+                      onBlur={() => setHovered(null)}
+                      onClick={() => toggleIsolate(name)}
+                      className={`flex h-8 items-center gap-1.5 rounded px-1.5 text-[11px] transition-opacity hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring${isolate === name ? " text-foreground" : " text-muted-foreground"}${dim ? " opacity-40" : ""}`}
+                    >
+                      {dashedSet.has(name) ? (
+                        <span aria-hidden className="inline-block h-0 w-3 border-t-2 border-dashed" style={{ borderColor: c }} />
+                      ) : (
+                        <span aria-hidden className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: c }} />
+                      )}
+                      {name}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            {sel.visible.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No drivers match.</p>
+            ) : (
+              <ChartCard
+                title="Drivers' championship"
+                subtitle={`Cumulative points · ${sel.visible.length} shown`}
+              >
+                <LineChart data={standingsSeries.rows}>
+                  <CartesianGrid {...GRID_PROPS} />
+                  <XAxis
+                    dataKey="race"
+                    {...AXIS}
+                    tick={TICK}
+                    interval={1}
+                    tickFormatter={raceTick}
+                  />
+                  <YAxis {...AXIS} tick={TICK} width={45} />
+                  <ChartTooltip content={champTip} />
+                  {sel.visible.map((n) => {
+                    const c = colourOf(n);
+                    const dash = dashedSet.has(n);
+                    const dim = sel.focus != null && sel.focus !== n;
+                    return (
+                      <Line
+                        key={n}
+                        dataKey={n}
+                        stroke={c}
+                        strokeWidth={2}
+                        strokeOpacity={dim ? 0.15 : 1}
+                        strokeDasharray={dash ? "6 4" : undefined}
+                        // teammate marker difference: dashed 2nd driver also carries dots
+                        dot={dash ? { r: 2.5, strokeWidth: 0, fill: c } : false}
+                        activeDot={{ r: 4 }}
+                        // off: 20-line range switches must not queue 1.5s animations
+                        isAnimationActive={false}
+                        onMouseEnter={() => setHovered(n)}
+                        onMouseLeave={() => setHovered(null)}
+                        onClick={() => toggleIsolate(n)}
+                      />
+                    );
+                  })}
+                </LineChart>
+              </ChartCard>
+            )}
+          </>
         </StageSlot>
       </section>
 

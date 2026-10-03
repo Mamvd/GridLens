@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import {
   loadRaceBundle, computeStrategies, driverLapsForSectors, fmtLapTime,
-  nameOfDriver,
+  nameOfDriver, raceIsUnrun,
   type RaceBundle,
 } from "../data/race";
 import type { Meeting } from "../api/openf1";
@@ -52,6 +52,9 @@ export const Race = ({ meeting }: Props) => {
 
   // find the race session for this meeting
   useEffect(() => {
+    // future race: single-key session_result 404s with no CORS headers (opaque
+    // "Failed to fetch") — prevent the request, never catch it.
+    if (raceIsUnrun(meeting)) return;
     let alive = true;
     const controller = new AbortController();
     setError("");
@@ -59,14 +62,14 @@ export const Race = ({ meeting }: Props) => {
     setRefDriver(null);
     setRivalDriver(null);
     seasonRaceSessions(meeting.year)
-      .then((sessions) => {
+      .then((sessionsRes) => {
         if (!alive) return;
-        const race = sessions.find((s) => s.meeting_key === meeting.meeting_key);
+        const race = sessionsRes.data.find((s) => s.meeting_key === meeting.meeting_key);
         if (!race) { setError("No race session found for this meeting."); return; }
         loadRaceBundle(race.session_key, meeting.year)
           .then((b) => {
             if (!alive) return;
-            setBundle(b);
+            setBundle({ ...b, stale: b.stale || sessionsRes.stale });
             const sorted = [...b.results].filter((r) => r.driver_number).sort((a, b2) => (a.position ?? Infinity) - (b2.position ?? Infinity));
             if (sorted.length >= 2) {
               setRefDriver(sorted[0].driver_number);
@@ -89,6 +92,26 @@ export const Race = ({ meeting }: Props) => {
   }, [meeting, reloadKey]);
 
   const strategies = useMemo(() => (bundle ? computeStrategies(bundle) : []), [bundle]);
+
+  // render guard mirrors the effect guard above — no bundle fetch ever fires
+  if (raceIsUnrun(meeting)) {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+          <p className="text-sm text-muted-foreground">
+            {meeting.meeting_name} hasn&apos;t been run yet — no data available.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate(`/season/${meeting.year}`)}
+          >
+            ← Season
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
 
   if (error) {
     return (
@@ -125,6 +148,11 @@ export const Race = ({ meeting }: Props) => {
 
   return (
     <div className="race">
+      {bundle.stale && (
+        <div className="mb-4 rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+          Data may be out of date (latest revalidation failed).
+        </div>
+      )}
       <Card className="mb-6">
         <div className="flex flex-row items-start justify-between space-y-0 pb-4">
           <div className="space-y-1">

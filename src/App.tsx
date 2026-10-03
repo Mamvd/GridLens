@@ -7,12 +7,13 @@ import { getOpenF1, type Meeting } from "./api/openf1";
 import { Season } from "./views/Season";
 import { Race } from "./views/Race";
 import { meetingFor } from "./lib/slug";
+import { availableYears } from "./lib/years";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
-const YEARS = [2026, 2025, 2024, 2023];
+const YEARS = availableYears();
 const DEFAULT_YEAR = 2026;
 const TABS = ["pace", "gaps", "strategy", "pit"] as const;
 

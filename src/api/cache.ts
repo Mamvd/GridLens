@@ -83,35 +83,67 @@ const getCachedEntry = <T>(resource: string, ops: Record<string, string | number
   return undefined;
 };
 
+export interface CachedResult<T> { data: T[]; stale: boolean }
+
+// Any-age entry for stale-if-error rescue. mem first: memory-only payloads
+// (intervals > 500 KB) never reach localStorage, and mem can be newer when a
+// quota-blocked LS write silently failed.
+const getStaleEntry = <T>(resource: string, ops: Record<string, string | number | boolean | any[]>): T[] | undefined => {
+  const key = cacheKey(resource, ops);
+  const m = mem.get(key);
+  if (m) return m.d as T[];
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { d: T[]; f: number };
+      if (parsed && typeof parsed.f === "number" && "d" in parsed) return parsed.d;
+    }
+  } catch { /* corrupt — treat as absent */ }
+  return undefined;
+};
+
 // Cached fetcher: fresh hit → return; otherwise one shared request per key
 // (in-flight dedupe protects StrictMode double-invokes + concurrent callers).
 // live policy skips both tiers and refetches every call (dedupe concurrent only).
+// stale-if-error: revalidation fails + persisted entry exists → {stale: true}
+// instead of throwing; AbortError always rethrows (aborted year-swap must not
+// fall back to the previous year's data).
 export const cached = async <T>(
   resource: string,
   ops: Record<string, string | number | boolean | any[]>,
   fn: () => Promise<T[]>,
   policy: CachePolicy,
-): Promise<T[]> => {
+): Promise<CachedResult<T>> => {
   const key = cacheKey(resource, ops);
+  let staleEntry: T[] | undefined;
   if (policy.persist) {
+    // capture BEFORE getCachedEntry — it deletes stale mem entries, which would
+    // destroy the only copy of a memory-only payload before the rescue runs.
+    staleEntry = getStaleEntry<T>(resource, ops);
     const hit = getCachedEntry<T>(resource, ops, policy.ttlMs);
-    if (hit) return hit;
+    if (hit) return { data: hit, stale: false };
   }
-  const pending = inflight.get(key) as Promise<T[]> | undefined;
+  const pending = inflight.get(key) as Promise<CachedResult<T>> | undefined;
   if (pending) return pending;
-  const p = (async () => {
-    const data = await fn();
-    if (policy.persist) {
-      const f = Date.now();
-      mem.set(key, { d: data, f });
-      const json = JSON.stringify({ d: data, f });
-      // ponytail: heavy resources (intervals ≈ 4 MB/race) stay memory-only;
-      // they'd otherwise eat the whole ~5 MB localStorage quota on the first race.
-      if (json.length < 500_000) {
-        try { localStorage.setItem(key, json); } catch { /* quota exceeded — mem still works */ }
+  const p = (async (): Promise<CachedResult<T>> => {
+    try {
+      const data = await fn();
+      if (policy.persist) {
+        const f = Date.now();
+        mem.set(key, { d: data, f });
+        const json = JSON.stringify({ d: data, f });
+        // ponytail: heavy resources (intervals ≈ 4 MB/race) stay memory-only;
+        // they'd otherwise eat the whole ~5 MB localStorage quota on the first race.
+        if (json.length < 500_000) {
+          try { localStorage.setItem(key, json); } catch { /* quota exceeded — mem still works */ }
+        }
       }
+      return { data, stale: false };
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") throw e;
+      if (staleEntry) return { data: staleEntry, stale: true };
+      throw e;
     }
-    return data;
   })().finally(() => { inflight.delete(key); });
   inflight.set(key, p);
   return p;

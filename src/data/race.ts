@@ -22,7 +22,14 @@ export interface RaceBundle {
   overtakes: Overtake[];
   grid: StartingGrid[];
   numberToDriver: Map<number, Driver>;
+  stale: boolean;
 }
+
+// Future race → no session rows exist yet; a single-key request 404s with no
+// CORS headers (opaque "Failed to fetch"). Prevent the call, don't catch it.
+// Boundary: date_start == now counts as run (strict >).
+export const raceIsUnrun = (m: { date_start: string }, nowMs: number = Date.now()): boolean =>
+  new Date(m.date_start).getTime() > nowMs;
 
 export const loadRaceBundle = async (
   sessionKey: number,
@@ -34,7 +41,7 @@ export const loadRaceBundle = async (
   // date_end from the session rows already in memory to detect live precisely.
   const status = live ? "live" : year == null ? "in-progress" : classifySeason(year);
   const policy = getCachePolicy(year ?? new Date().getFullYear(), status);
-    const [drivers, laps, intervals, stints, pitEvents, results, overtakes, grid] =
+    const [driversRes, lapsRes, intervalsRes, stintsRes, pitRes, resultsRes, overtakesRes, grid] =
     await Promise.all([
       cached<Driver>("drivers", { session_key: sessionKey }, () =>
         getOpenF1<Driver>("drivers", { session_key: sessionKey }), policy),
@@ -60,10 +67,21 @@ export const loadRaceBundle = async (
       })(),
     ]);
 
+  const drivers = driversRes.data;
   const numberToDriver = new Map(drivers.map((d) => [d.driver_number, d]));
   return {
-    sessionKey, drivers, laps, intervals, stints, pitEvents, results, overtakes, grid,
+    sessionKey,
+    drivers: driversRes.data,
+    laps: lapsRes.data,
+    intervals: intervalsRes.data,
+    stints: stintsRes.data,
+    pitEvents: pitRes.data,
+    results: resultsRes.data,
+    overtakes: overtakesRes.data,
+    grid,
     numberToDriver,
+    stale: driversRes.stale || lapsRes.stale || intervalsRes.stale || stintsRes.stale
+      || pitRes.stale || resultsRes.stale || overtakesRes.stale,
   };
 };
 

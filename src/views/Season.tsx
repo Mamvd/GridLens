@@ -5,11 +5,13 @@ import {
   BarChart, Bar,
 } from "recharts";
 import { seasonBundle, type SeasonStats } from "../data/season";
+import { raceIsUnrun } from "../data/race";
 import type { Meeting } from "../api/openf1";
 import { slugForMeeting } from "../lib/slug";
 import { ChartCard, ChartTooltip } from "@/components/charts/ChartCard";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -55,13 +57,14 @@ const ChartSkeleton = ({ className }: { className?: string }) => (
 
 export const Season = ({ year, meetings }: Props) => {
   const navigate = useNavigate();
-  const [loaded, setLoaded] = useState<{ year: number; stats: SeasonStats } | null>(null);
+  const [loaded, setLoaded] = useState<{ year: number; stats: SeasonStats; stale: boolean } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   // only expose stats whose year matches the current prop — a slow older
   // bundle can never render under a newer season.
   const stats = loaded && loaded.year === year ? loaded.stats : null;
+  const stale = loaded && loaded.year === year ? loaded.stale : false;
 
   useEffect(() => {
     let alive = true;
@@ -70,7 +73,7 @@ export const Season = ({ year, meetings }: Props) => {
     setError("");
     seasonBundle(year, meetings)
       .then((b) => {
-        if (alive) setLoaded({ year, stats: b.stats });
+        if (alive) setLoaded({ year, stats: b.stats, stale: b.stale });
       })
       .catch((e) => {
         if ((e as Error)?.name === "AbortError") return;
@@ -169,6 +172,11 @@ export const Season = ({ year, meetings }: Props) => {
 
   return (
     <div className="space-y-8">
+      {stale && (
+        <div className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+          Data may be out of date (latest revalidation failed).
+        </div>
+      )}
       <section>
         <h3 className={SECTION}>Calendar</h3>
         <Card>
@@ -177,28 +185,34 @@ export const Season = ({ year, meetings }: Props) => {
               <p className="text-sm text-muted-foreground">No races found for {year}.</p>
             ) : (
               <div className={MEETING_GRID}>
-                {meetings.map((m) => (
-                  <button
-                    key={m.meeting_key}
-                    type="button"
-                    title={m.meeting_name}
-                    onClick={() => navigate(`/race/${m.year}/${slugForMeeting(meetings, m)}`)}
-                    className="flex items-center gap-3 rounded-lg border bg-muted/40 px-3 py-2.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    <img
-                      src={m.country_flag}
-                      alt=""
-                      width={24}
-                      className="h-auto w-6 shrink-0 rounded-[2px]"
-                    />
-                    <span className="min-w-0">
-                      <span className="block truncate text-[13px] font-medium">{m.meeting_name}</span>
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {m.circuit_short_name}
+                {meetings.map((m) => {
+                  const upcoming = raceIsUnrun(m);
+                  return (
+                    <button
+                      key={m.meeting_key}
+                      type="button"
+                      title={m.meeting_name}
+                      onClick={() => navigate(`/race/${m.year}/${slugForMeeting(meetings, m)}`)}
+                      className={`flex items-center gap-3 rounded-lg border bg-muted/40 px-3 py-2.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring${upcoming ? " opacity-60" : ""}`}
+                    >
+                      <img
+                        src={m.country_flag}
+                        alt=""
+                        width={24}
+                        className="h-auto w-6 shrink-0 rounded-[2px]"
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate text-[13px] font-medium">{m.meeting_name}</span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {m.circuit_short_name}
+                        </span>
                       </span>
-                    </span>
-                  </button>
-                ))}
+                      {upcoming && (
+                        <Badge variant="secondary" className="ml-auto shrink-0">upcoming</Badge>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </CardContent>

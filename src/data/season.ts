@@ -79,17 +79,20 @@ export interface SeasonStats {
   progression: SeasonPoint[];
 }
 
-export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<{ meetings: Meeting[]; stats: SeasonStats }> => {
-  const m = meetings ?? await seasonMeetings(year);
-  const races = await seasonRaceSessions(year);
-  const sprints = await seasonSprintSessions(year);
+export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<{ meetings: Meeting[]; stats: SeasonStats; stale: boolean }> => {
+  const ownMeetings = meetings ? null : await seasonMeetings(year);
+  const m = meetings ?? ownMeetings!.data;
+  const racesRes = await seasonRaceSessions(year);
+  const sprintsRes = await seasonSprintSessions(year);
+  const races = racesRes.data;
+  const sprints = sprintsRes.data;
 
   // Batch the whole season into 4 multi-value requests (OpenF1 accepts
   // repeated session_key). ponytail: swap for per-race cached requests only
   // if a single batch response outgrows browser memory (~rare).
   const sks = races.map((r) => r.session_key);
   const sprintSks = sprints.map((s) => s.session_key);
-  const [results, pit, stints, drivers] = await Promise.all([
+  const [resultsRes, pitRes, stintsRes, driversRes] = await Promise.all([
     // session_result spans Race + Sprint (points); mixed batch stays HTTP 200
     // as long as ≥1 key has rows — ponytail: future/empty sessions
     // contribute zero rows via the `?? []` below, no special-casing.
@@ -102,6 +105,13 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     cached<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, () =>
       getOpenF1<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }), seasonPolicy(year)),
   ]);
+  const results = resultsRes.data;
+  const pit = pitRes.data;
+  const stints = stintsRes.data;
+  const drivers = driversRes.data;
+  // any sub-fetch served stale → surface it once for the view banner
+  const stale = (ownMeetings?.stale ?? false) || racesRes.stale || sprintsRes.stale
+    || resultsRes.stale || pitRes.stale || stintsRes.stale || driversRes.stale;
   const bySession = <T extends { session_key: number }>(rows: T[]) => {
     const m = new Map<number, T[]>();
     for (const r of rows) {
@@ -259,5 +269,5 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     strategyCount: [...strategyAgg.entries()].map(([strategy, count]) => ({ strategy, count })).sort((a, b) => b.count - a.count),
     progression,
   };
-  return { meetings: m, stats };
+  return { meetings: m, stats, stale };
 };

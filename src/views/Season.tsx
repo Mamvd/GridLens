@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Legend,
   BarChart, Bar,
 } from "recharts";
-import { seasonBundle, type SeasonStats } from "../data/season";
+import {
+  seasonCore, seasonExtras, type SeasonCore, type SeasonExtras,
+} from "../data/season";
 import { raceIsUnrun } from "../data/race";
 import type { Meeting } from "../api/openf1";
 import { slugForMeeting } from "../lib/slug";
@@ -21,7 +23,7 @@ interface Props {
   year: number;
   meetings: Meeting[];
   // #9: meetings list came from stale cache after an API failure — show the
-  // out-of-date note alongside seasonBundle's own stale flag.
+  // out-of-date note alongside the stages' own stale flags.
   meetingsStale?: boolean;
 }
 
@@ -58,42 +60,111 @@ const ChartSkeleton = ({ className }: { className?: string }) => (
   </Card>
 );
 
+// stage lifecycle: year-tagged state + derived status (year mismatch from a
+// slow old-year stage reads as loading — never renders under a new year)
+type Stage<T> = { year: number; data: T | null; stale: boolean; error: string };
+type StageStatus = "ready" | "loading" | "failed";
+const stageStatus = <T,>(s: Stage<T>, year: number): StageStatus =>
+  s.year !== year || (!s.data && !s.error) ? "loading" : s.error ? "failed" : "ready";
+
+const CachedNote = () => (
+  <p className="mb-2 text-[11px] text-muted-foreground">based on cached data</p>
+);
+
+const StageError = ({ message, error, onRetry }: { message: string; error: string; onRetry: () => void }) => (
+  <Card className="border-destructive/50 bg-destructive/10">
+    <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+      <p className="text-[13px] text-destructive" title={error}>{message}</p>
+      <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
+    </CardContent>
+  </Card>
+);
+
+// one section slot bound to one stage: failed → its error card, loading →
+// skeleton, ready → cached note (when stale) + content
+const StageSlot = ({
+  status, error, stale, message, onRetry, skeleton, children,
+}: {
+  status: StageStatus;
+  error: string;
+  stale: boolean;
+  message: string;
+  onRetry: () => void;
+  skeleton: ReactNode;
+  children: ReactNode;
+}) => {
+  if (status === "failed") return <StageError message={message} error={error} onRetry={onRetry} />;
+  if (status === "loading") return <>{skeleton}</>;
+  return (
+    <>
+      {stale && <CachedNote />}
+      {children}
+    </>
+  );
+};
+
+const stepLabel = (s: StageStatus) => (s === "ready" ? "✓" : s === "failed" ? "failed" : "loading…");
+
 export const Season = ({ year, meetings, meetingsStale }: Props) => {
   const navigate = useNavigate();
-  const [loaded, setLoaded] = useState<{ year: number; stats: SeasonStats; stale: boolean } | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [reloadKey, setReloadKey] = useState(0);
-  // only expose stats whose year matches the current prop — a slow older
-  // bundle can never render under a newer season.
-  const stats = loaded && loaded.year === year ? loaded.stats : null;
-  const stale = loaded && loaded.year === year ? loaded.stale : false;
+  const [core, setCore] = useState<Stage<SeasonCore>>({ year: -1, data: null, stale: false, error: "" });
+  const [extras, setExtras] = useState<Stage<SeasonExtras>>({ year: -1, data: null, stale: false, error: "" });
+  const [coreRetry, setCoreRetry] = useState(0);
+  const [extrasRetry, setExtrasRetry] = useState(0);
 
   useEffect(() => {
     let alive = true;
     const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    seasonBundle(year, meetings)
-      .then((b) => {
-        if (alive) setLoaded({ year, stats: b.stats, stale: b.stale });
+    seasonCore(year, meetings)
+      .then((r) => {
+        if (alive) setCore({ year, data: r, stale: r.stale, error: "" });
       })
       .catch((e) => {
         if ((e as Error)?.name === "AbortError") return;
-        if (alive) setError(String(e));
-      })
-      .finally(() => alive && setLoading(false));
-    // ponytail: signal not threaded through seasonBundle (data layer frozen) —
+        if (alive) setCore({ year, data: null, stale: false, error: String(e) });
+      });
+    // ponytail: signal not threaded through seasonCore (data layer frozen) —
     // alive + year-scoped payload guard staleness; abort activates once opts lands.
     return () => { alive = false; controller.abort(); };
-  }, [year, meetings, reloadKey]);
+  }, [year, meetings, coreRetry]);
+
+  useEffect(() => {
+    let alive = true;
+    const controller = new AbortController();
+    seasonExtras(year)
+      .then((r) => {
+        if (alive) setExtras({ year, data: r, stale: r.stale, error: "" });
+      })
+      .catch((e) => {
+        if ((e as Error)?.name === "AbortError") return;
+        if (alive) setExtras({ year, data: null, stale: false, error: String(e) });
+      });
+    return () => { alive = false; controller.abort(); };
+  }, [year, extrasRetry]);
+
+  const coreStatus = stageStatus(core, year);
+  const extrasStatus = stageStatus(extras, year);
+  const coreData = core.year === year ? core.data : null;
+  const extrasData = extras.year === year ? extras.data : null;
+  const coreReady = coreStatus === "ready" && coreData != null;
+  const coreStale = coreReady && core.stale;
+  const extrasStale = extrasStatus === "ready" && extras.stale;
+
+  const retryCore = () => {
+    setCore((s) => ({ ...s, data: null, error: "" }));
+    setCoreRetry((k) => k + 1);
+  };
+  const retryExtras = () => {
+    setExtras((s) => ({ ...s, data: null, error: "" }));
+    setExtrasRetry((k) => k + 1);
+  };
 
   // cumulative points per driver across the season
   const standingsSeries = useMemo(() => {
-    if (!stats) return { rows: [] as Record<string, number | string>[], names: [] as string[] };
+    if (!coreData) return { rows: [] as Record<string, number | string>[], names: [] as string[] };
     const perDriver = new Map<string, number>();
     const rows: Record<string, number | string>[] = [];
-    for (const p of stats.progression) {
+    for (const p of coreData.progression) {
       for (const dp of p.racePoints) {
         perDriver.set(dp.name, (perDriver.get(dp.name) ?? 0) + dp.points);
       }
@@ -104,78 +175,22 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
     }
     const names = [...perDriver.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([n]) => n);
     return { rows, names };
-  }, [stats]);
+  }, [coreData]);
 
-  if (loading) {
-    return (
-      <div className="space-y-8">
-        <section>
-          <h3 className={SECTION}>Calendar</h3>
-          <Card>
-            <CardContent className="pt-6">
-              <div className={MEETING_GRID}>
-                {Array.from({ length: meetings.length || 12 }, (_, i) => (
-                  <Skeleton key={i} className="h-14 w-full" />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        </section>
-        <section>
-          <h3 className={SECTION}>Championship</h3>
-          <ChartSkeleton />
-        </section>
-        <section>
-          <h3 className={SECTION}>Teams &amp; strategy</h3>
-          <div className="grid gap-6 lg:grid-cols-2">
-            <ChartSkeleton />
-            <ChartSkeleton />
-          </div>
-        </section>
-        <section>
-          <h3 className={SECTION}>Drivers&apos; points</h3>
-          <Card>
-            <CardContent className="space-y-3 pt-6">
-              {Array.from({ length: 8 }, (_, i) => (
-                <Skeleton key={i} className="h-4 w-full" />
-              ))}
-            </CardContent>
-          </Card>
-        </section>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <Card className="border-destructive/50 bg-destructive/10">
-        <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
-          <p className="text-[13px] text-destructive" title={error}>
-            Failed to load the {year} season.
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setError("");
-              setLoading(true);
-              setReloadKey((k) => k + 1);
-            }}
-          >
-            Retry
-          </Button>
-        </CardContent>
-      </Card>
-    );
-  }
-  if (!stats) return null;
-
-  const topTeams = stats.teamChampionship.slice(0, 10);
-  const topStrategies = stats.strategyCount.filter((s) => s.strategy !== "no-data").slice(0, 8);
+  const topTeams = coreReady && coreData ? coreData.teamChampionship.slice(0, 10) : [];
+  const topStrategies = (extrasData?.strategyCount ?? []).filter((s) => s.strategy !== "no-data").slice(0, 8);
+  const stagePending = coreStatus !== "ready" || extrasStatus !== "ready";
+  const coreError = core.year === year ? core.error : "";
+  const extrasError = extras.year === year ? extras.error : "";
 
   return (
     <div className="space-y-8">
-      {(stale || meetingsStale) && (
+      {stagePending && (
+        <div role="status" className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+          {`calendar ✓ · championship data ${stepLabel(coreStatus)} · strategy data ${stepLabel(extrasStatus)}`}
+        </div>
+      )}
+      {(coreStale || extrasStale || meetingsStale) && (
         <div className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
           Data may be out of date (latest revalidation failed).
         </div>
@@ -224,106 +239,145 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
 
       <section>
         <h3 className={SECTION}>Championship</h3>
-        <ChartCard title="Drivers' championship" subtitle="Top 10 cumulative points">
-          <LineChart data={standingsSeries.rows}>
-            <CartesianGrid {...GRID_PROPS} />
-            <XAxis
-              dataKey="race"
-              {...AXIS}
-              tick={TICK}
-              interval={1}
-              tickFormatter={raceTick}
-            />
-            <YAxis {...AXIS} tick={TICK} width={45} />
-            <ChartTooltip
-              formatter={(value, name) => [fmtNum(value), name]}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            {standingsSeries.names.map((n, i) => (
-              <Line
-                key={n}
-                dataKey={n}
-                dot={false}
-                strokeWidth={2}
-                stroke={SERIES[i % SERIES.length]}
-                strokeOpacity={i < SERIES.length ? 1 : 0.55}
+        <StageSlot
+          status={coreStatus} error={coreError} stale={coreStale}
+          message={`Failed to load the ${year} championship data.`}
+          onRetry={retryCore} skeleton={<ChartSkeleton />}
+        >
+          <ChartCard title="Drivers' championship" subtitle="Top 10 cumulative points">
+            <LineChart data={standingsSeries.rows}>
+              <CartesianGrid {...GRID_PROPS} />
+              <XAxis
+                dataKey="race"
+                {...AXIS}
+                tick={TICK}
+                interval={1}
+                tickFormatter={raceTick}
               />
-            ))}
-          </LineChart>
-        </ChartCard>
+              <YAxis {...AXIS} tick={TICK} width={45} />
+              <ChartTooltip
+                formatter={(value, name) => [fmtNum(value), name]}
+              />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {standingsSeries.names.map((n, i) => (
+                <Line
+                  key={n}
+                  dataKey={n}
+                  dot={false}
+                  strokeWidth={2}
+                  stroke={SERIES[i % SERIES.length]}
+                  strokeOpacity={i < SERIES.length ? 1 : 0.55}
+                />
+              ))}
+            </LineChart>
+          </ChartCard>
+        </StageSlot>
       </section>
 
       <section>
         <h3 className={SECTION}>Teams &amp; strategy</h3>
         <div className="grid gap-6 lg:grid-cols-2">
-          <ChartCard title="Constructors' championship" subtitle="Top 10 teams">
-            <BarChart data={topTeams}>
-              <CartesianGrid {...GRID_PROPS} />
-              <XAxis
-                dataKey="team"
-                {...AXIS}
-                tick={TICK}
-                interval={0}
-                angle={-20}
-                height={60}
-              />
-              <YAxis {...AXIS} tick={TICK} width={45} allowDecimals={false} />
-              <ChartTooltip formatter={(value) => [fmtNum(value), "Points"]} />
-              <Bar dataKey="points" name="Points" fill="var(--chart-4)" />
-            </BarChart>
-          </ChartCard>
+          {/* core failed → its one error card already sits above; skip duplicates */}
+          {coreStatus === "failed" ? null : (
+            <StageSlot
+              status={coreStatus} error={coreError} stale={coreStale}
+              message={`Failed to load the ${year} championship data.`}
+              onRetry={retryCore} skeleton={<ChartSkeleton />}
+            >
+              <ChartCard title="Constructors' championship" subtitle="Top 10 teams">
+                <BarChart data={topTeams}>
+                  <CartesianGrid {...GRID_PROPS} />
+                  <XAxis
+                    dataKey="team"
+                    {...AXIS}
+                    tick={TICK}
+                    interval={0}
+                    angle={-20}
+                    height={60}
+                  />
+                  <YAxis {...AXIS} tick={TICK} width={45} allowDecimals={false} />
+                  <ChartTooltip formatter={(value) => [fmtNum(value), "Points"]} />
+                  <Bar dataKey="points" name="Points" fill="var(--chart-4)" />
+                </BarChart>
+              </ChartCard>
+            </StageSlot>
+          )}
 
-          <ChartCard title="Most common strategies" subtitle="Compound sequences across the season">
-            <BarChart data={topStrategies} layout="vertical">
-              <CartesianGrid {...GRID_PROPS} />
-              <XAxis type="number" {...AXIS} tick={TICK} allowDecimals={false} />
-              {/* full SOFT/MEDIUM/HARD words straight from season.ts — width keeps long sequences untruncated */}
-              <YAxis
-                type="category"
-                dataKey="strategy"
-                {...AXIS}
-                tick={TICK}
-                width={170}
-                interval={0}
-              />
-              <ChartTooltip formatter={(value) => [fmtNum(value), "Races"]} />
-              <Bar dataKey="count" name="Races" fill="var(--chart-5)" />
-            </BarChart>
-          </ChartCard>
+          <StageSlot
+            status={extrasStatus} error={extrasError} stale={extrasStale}
+            message={`Failed to load the ${year} strategy data.`}
+            onRetry={retryExtras} skeleton={<ChartSkeleton />}
+          >
+            <ChartCard title="Most common strategies" subtitle="Compound sequences across the season">
+              <BarChart data={topStrategies} layout="vertical">
+                <CartesianGrid {...GRID_PROPS} />
+                <XAxis type="number" {...AXIS} tick={TICK} allowDecimals={false} />
+                {/* full SOFT/MEDIUM/HARD words straight from season.ts — width keeps long sequences untruncated */}
+                <YAxis
+                  type="category"
+                  dataKey="strategy"
+                  {...AXIS}
+                  tick={TICK}
+                  width={170}
+                  interval={0}
+                />
+                <ChartTooltip formatter={(value) => [fmtNum(value), "Races"]} />
+                <Bar dataKey="count" name="Races" fill="var(--chart-5)" />
+              </BarChart>
+            </ChartCard>
+          </StageSlot>
         </div>
       </section>
 
-      <section>
-        <h3 className={SECTION}>Drivers&apos; points</h3>
-        <Card>
-          <CardContent className="pt-6">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Driver</TableHead>
-                  <TableHead>Team</TableHead>
-                  <TableHead className="text-right">Pts</TableHead>
-                  <TableHead className="text-right">Wins</TableHead>
-                  <TableHead className="text-right">Podiums</TableHead>
-                  <TableHead className="text-right">DNF</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {stats.championship.map((d) => (
-                  <TableRow key={d.driverName}>
-                    <TableCell className="font-medium">{d.driverName}</TableCell>
-                    <TableCell className="text-muted-foreground">{d.team}</TableCell>
-                    <TableCell className="text-right tabular-nums">{d.points}</TableCell>
-                    <TableCell className="text-right tabular-nums">{d.wins}</TableCell>
-                    <TableCell className="text-right tabular-nums">{d.podiums}</TableCell>
-                    <TableCell className="text-right tabular-nums">{d.dnf}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </section>
+      {/* core failed → its one error card already sits above; skip duplicates */}
+      {coreStatus !== "failed" && (
+        <section>
+          <h3 className={SECTION}>Drivers&apos; points</h3>
+          <StageSlot
+            status={coreStatus} error={coreError} stale={coreStale}
+            message={`Failed to load the ${year} championship data.`}
+            onRetry={retryCore}
+            skeleton={
+              <Card>
+                <CardContent className="space-y-3 pt-6">
+                  {Array.from({ length: 8 }, (_, i) => (
+                    <Skeleton key={i} className="h-4 w-full" />
+                  ))}
+                </CardContent>
+              </Card>
+            }
+          >
+            <Card>
+              <CardContent className="pt-6">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Driver</TableHead>
+                      <TableHead>Team</TableHead>
+                      <TableHead className="text-right">Pts</TableHead>
+                      <TableHead className="text-right">Wins</TableHead>
+                      <TableHead className="text-right">Podiums</TableHead>
+                      <TableHead className="text-right">DNF</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(coreData?.championship ?? []).map((d) => (
+                      <TableRow key={d.driverName}>
+                        <TableCell className="font-medium">{d.driverName}</TableCell>
+                        <TableCell className="text-muted-foreground">{d.team}</TableCell>
+                        <TableCell className="text-right tabular-nums">{d.points}</TableCell>
+                        <TableCell className="text-right tabular-nums">{d.wins}</TableCell>
+                        <TableCell className="text-right tabular-nums">{d.podiums}</TableCell>
+                        <TableCell className="text-right tabular-nums">{d.dnf}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </StageSlot>
+        </section>
+      )}
     </div>
   );
 };

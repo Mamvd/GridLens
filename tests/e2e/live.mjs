@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// tests/e2e/run.mjs — Playwright smoke suite vs `vite preview` + system chromium.
+// tests/e2e/live.mjs — Playwright smoke suite vs the REAL OpenF1 API.
 // OpenF1 is external/rate-limited: data-dependent asserts SKIP on error cards.
 // Non-data asserts (shell, router, overflow, bundle console errors) always run.
-// Usage: npm run e2e  (builds if dist/index.html missing)
+// Usage: npm run e2e:live  (builds if dist/index.html missing)
+// Deterministic fixture suite lives in deterministic.mjs — `npm run e2e`.
 
 import { spawn, execFileSync } from "node:child_process";
 import net from "node:net";
@@ -273,7 +274,8 @@ const main = async () => {
   const failed = results.filter((r) => r.status === "FAIL");
   const skipped = results.filter((r) => r.status === "SKIP");
   console.log(`\n${results.filter((r) => r.status === "PASS").length} PASS, ${skipped.length} SKIP, ${failed.length} FAIL`);
-  if (failed.length) process.exit(1);
+  // always exit explicitly — the spawned vite preview keeps stdio handles open
+  process.exit(failed.length ? 1 : 0);
 };
 
 main().catch((e) => { console.error(e); process.exit(1); });

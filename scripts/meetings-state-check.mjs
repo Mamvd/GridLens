@@ -16,7 +16,8 @@ execSync(
 const require = createRequire(import.meta.url);
 const modPath = ["/tmp/meetingscheck/lib/meetings-state.js", "/tmp/meetingscheck/meetings-state.js"].find(existsSync);
 if (!modPath) throw new Error("compiled meetings-state.js not found under /tmp/meetingscheck");
-const { resolveMeetingsState, initialMeetingsState, isRestrictedOpenF1Error } = require(modPath);
+const { resolveMeetingsState, initialMeetingsState, isRestrictedOpenF1Error,
+  describeFailure, shouldAutoRetry, retryDelayMs } = require(modPath);
 assert.equal(typeof resolveMeetingsState, "function", "resolveMeetingsState export missing");
 assert.equal(typeof isRestrictedOpenF1Error, "function", "isRestrictedOpenF1Error export missing");
 
@@ -107,6 +108,45 @@ check("8. restricted flag preserved on error event; reset by start/success", () 
   assert.equal(ok.restricted, undefined, "success resets restricted");
   const staleOk = resolveMeetingsState(err, { type: "staleFallback", year: 2026, meetings: [m] });
   assert.equal(staleOk.restricted, undefined, "staleFallback resets restricted");
+});
+
+check("9. describeFailure: offline wins; restricted when body readable; unreachable otherwise", () => {
+  const lockout = new Error('OpenF1 401 on meetings: {"detail":"Live F1 session in progress..."}');
+  assert.equal(describeFailure(lockout, false), "offline", "offline wins even with restricted-looking message");
+  assert.equal(describeFailure(lockout, true), "restricted");
+  assert.equal(describeFailure(new TypeError("Failed to fetch"), true), "unreachable", "opaque browser failure");
+  assert.equal(describeFailure(new Error("network down"), true), "unreachable");
+  assert.equal(describeFailure(new Error('OpenF1 500 on meetings: boom'), true), "unreachable", "typed error still unreachable category");
+});
+
+check("10. shouldAutoRetry: opaque failures ≤2 retries; typed/abort never", () => {
+  const opaque = new TypeError("Failed to fetch");
+  assert.equal(shouldAutoRetry(opaque, 0), true, "attempt 0 retries");
+  assert.equal(shouldAutoRetry(opaque, 1), true, "attempt 1 retries");
+  assert.equal(shouldAutoRetry(opaque, 2), false, "bounded at 2");
+  assert.equal(shouldAutoRetry(new Error("OpenF1 404 on meetings: not found"), 0), false, "typed 4xx no retry");
+  assert.equal(shouldAutoRetry(new Error("OpenF1 429 on meetings: rate-limited"), 0), false, "429 has in-request backoff");
+  assert.equal(shouldAutoRetry(new Error("OpenF1 500 on meetings: boom"), 1), false, "typed 5xx no retry");
+  assert.equal(shouldAutoRetry(new DOMException("Aborted", "AbortError"), 0), false, "abort never retries");
+});
+
+check("11. retryDelayMs: exponential + jitter within bounds", () => {
+  const bounds = [[0, 1200, 1600], [1, 2400, 2800], [2, 4800, 5200]];
+  for (const [attempt, lo, hi] of bounds) {
+    for (let i = 0; i < 50; i++) {
+      const d = retryDelayMs(attempt);
+      assert.ok(d >= lo && d < hi, `attempt ${attempt} delay ${d} outside [${lo}, ${hi})`);
+    }
+  }
+});
+
+check("12. kind passes through error event; reset by start/success", () => {
+  const err = resolveMeetingsState(loading, { type: "error", year: 2026, kind: "offline" });
+  assert.equal(err.status, "error");
+  assert.equal(err.kind, "offline");
+  assert.equal(resolveMeetingsState(err, { type: "start", year: 2026 }).kind, undefined, "start resets kind");
+  const ok = resolveMeetingsState(err, { type: "success", year: 2026, meetings: [m] });
+  assert.equal(ok.kind, undefined, "success resets kind");
 });
 
 if (failed) {

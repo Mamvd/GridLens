@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BrowserRouter, Routes, Route, Navigate, Link,
   useParams, useLocation, useNavigate,
@@ -6,7 +6,8 @@ import {
 import { seasonMeetings } from "./data/season";
 import {
   resolveMeetingsState, initialMeetingsState, isRestrictedOpenF1Error,
-  type MeetingsLoadState,
+  describeFailure, shouldAutoRetry, retryDelayMs,
+  type MeetingsLoadState, type FailureKind,
 } from "./lib/meetings-state";
 import { Season } from "./views/Season";
 import { Race } from "./views/Race";
@@ -45,22 +46,25 @@ const NotFound = () => (
 
 // #9: meetings fetch failed with no cached entry — never "No races found".
 // Raw error text stays out of the copy (title attr only).
-// The live-session 401 lockout is CORS-opaque in browsers (no ACAO header →
-// "Failed to fetch"), so the default copy names it as a possibility; the
-// restricted branch only fires when the body IS readable (CORS headers on 401,
-// or non-browser env) — kept because it is strictly more accurate when reachable.
-const MeetingsErrorCard = ({ year, restricted, onRetry }: { year: number; restricted?: boolean; onRetry: () => void }) => (
-  <Card className="border-destructive/50 bg-destructive/10">
-    <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
-      <p className="text-[13px] text-destructive">
-        {restricted
-          ? "OpenF1 is temporarily restricting free access while a live F1 session is in progress — data for all seasons is unavailable until it ends."
-          : `OpenF1 could not be reached, so the ${year} season couldn't be loaded. This usually means you're offline, or OpenF1 is temporarily restricting free access — for example while a live F1 session is in progress. Check your connection and try again in a bit.`}
-      </p>
-      <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
-    </CardContent>
-  </Card>
-);
+// Three failure kinds (describeFailure): offline / restricted (401 body
+// readable — rare in the browser, the lockout is usually CORS-opaque) /
+// unreachable (opaque fetch failure, covers both outage and lockout).
+const MeetingsErrorCard = ({ kind, onRetry }: { kind?: FailureKind; onRetry: () => void }) => {
+  const k = kind ?? "unreachable";
+  const copy = k === "offline"
+    ? "You appear to be offline. Check your connection and try again."
+    : k === "restricted"
+      ? "OpenF1 is temporarily restricting free access while a live F1 session is in progress — data for all seasons is unavailable until it ends."
+      : "OpenF1 isn't responding. It may be limiting free access while a live F1 session is in progress. Check your connection, or try again in a bit.";
+  return (
+    <Card className="border-destructive/50 bg-destructive/10">
+      <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+        <p className="text-[13px] text-destructive">{copy}</p>
+        <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
+      </CardContent>
+    </Card>
+  );
+};
 
 const RouteSkeleton = () => (
   <Card>
@@ -78,7 +82,7 @@ const SeasonRoute = ({ state, onRetry }: { state: MeetingsLoadState; onRetry: ()
     return <Navigate to={`/season/${DEFAULT_YEAR}`} replace />;
   }
   // error + no stale cache → explicit error card (never "No races found")
-  if (state.status === "error") return <MeetingsErrorCard year={Number(year)} restricted={state.restricted} onRetry={onRetry} />;
+  if (state.status === "error") return <MeetingsErrorCard kind={state.kind} onRetry={onRetry} />;
   // success with 0 meetings is the ONLY empty case → Season shows "No races found"
   if (state.status !== "success") return <RouteSkeleton />;
   return (
@@ -104,7 +108,7 @@ const RaceRoute = ({ state, onRetry }: { state: MeetingsLoadState; onRetry: () =
     return <Navigate to={`/race/${year}/${slug}/pace`} replace />;
   }
   // meetings error → same card as Season route, not skeleton-forever / NotFound
-  if (state.status === "error") return <MeetingsErrorCard year={Number(year)} restricted={state.restricted} onRetry={onRetry} />;
+  if (state.status === "error") return <MeetingsErrorCard kind={state.kind} onRetry={onRetry} />;
   const meetings = state.status === "success" ? state.meetings : [];
   const loadedYear = state.status === "success" ? state.year : null;
   const meeting = meetingFor(meetings, slug ?? "");
@@ -124,35 +128,63 @@ const Shell = () => {
   // list came from cache after a failed fetch (seasonMeetings' stale-if-error).
   const [state, setState] = useState<MeetingsLoadState>(initialMeetingsState);
   const [reloadKey, setReloadKey] = useState(0);
+  // mirror for the "online" listener (it must see fresh state, not the
+  // closure's copy from the render that created the effect)
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   useEffect(() => {
     let alive = true;
     const controller = new AbortController();
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     setState((prev) => resolveMeetingsState(prev, { type: "start", year: year ?? DEFAULT_YEAR }));
     if (year !== null) {
+      let attempt = 0;
       // seasonMeetings → cached(): network failure with a cache entry resolves
-      // as {stale: true}; reject means no cache → error state (clean card).
-      seasonMeetings(year)
-        .then((res) => {
-          if (!alive) return;
-          setState((prev) => resolveMeetingsState(prev, {
-            type: "success",
-            year,
-            meetings: res.data,
-            stale: res.stale,
-          }));
-        })
-        .catch((e) => {
-          if ((e as Error)?.name === "AbortError") return;
-          if (!alive) return;
-          setState((prev) => resolveMeetingsState(prev, {
-            type: "error",
-            year,
-            restricted: isRestrictedOpenF1Error(e),
-          }));
-        });
+      // as {stale: true}; reject means no cache → bounded auto-retry of opaque
+      // network failures only, then the error state (clean card).
+      const load = () => {
+        seasonMeetings(year)
+          .then((res) => {
+            if (!alive) return;
+            setState((prev) => resolveMeetingsState(prev, {
+              type: "success",
+              year,
+              meetings: res.data,
+              stale: res.stale,
+            }));
+          })
+          .catch((e) => {
+            if ((e as Error)?.name === "AbortError") return;
+            if (!alive) return;
+            if (shouldAutoRetry(e, attempt)) {
+              retryTimer = setTimeout(load, retryDelayMs(attempt));
+              attempt += 1;
+              return;
+            }
+            setState((prev) => resolveMeetingsState(prev, {
+              type: "error",
+              year,
+              restricted: isRestrictedOpenF1Error(e),
+              kind: describeFailure(e, navigator.onLine),
+            }));
+          });
+      };
+      load();
     }
-    return () => { alive = false; controller.abort(); };
+    // reconnect while the error card shows → resume via reload: the fresh
+    // load continues where the old one stopped (in-flight requests dedupe,
+    // cached resources hit the cache — see api/cache.ts).
+    const onOnline = () => {
+      if (alive && stateRef.current.status === "error") setReloadKey((k) => k + 1);
+    };
+    window.addEventListener("online", onOnline);
+    return () => {
+      alive = false;
+      controller.abort();
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      window.removeEventListener("online", onOnline);
+    };
   }, [year, reloadKey]);
 
   // one document.title effect for every route

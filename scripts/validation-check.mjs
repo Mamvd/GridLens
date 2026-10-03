@@ -207,6 +207,32 @@ await check("type map: null optional passes (session_result.position/points, lap
   assert.equal(laps[0].lap_duration, null);
 });
 
+await check("type map: pit typed nullable — null stop_duration passes, string rejected", async () => {
+  // stop_duration is legitimately null in historical sessions → nullable, not required
+  mockFetch([{ session_key: 1, driver_number: 44, lap_number: 21, stop_duration: null, stop_speed: null }]);
+  const rows = await getOpenF1("pit", { session_key: 1 });
+  assert.equal(rows[0].stop_duration, null);
+
+  mockFetch([{ session_key: 1, driver_number: 44, lap_number: 21, stop_duration: "2.4", stop_speed: null }]);
+  await assert.rejects(
+    () => getOpenF1("pit", { session_key: 1 }),
+    (e) => isValidationError(e, /pit: bad type for stop_duration \(expected number\|null\)/),
+  );
+});
+
+await check("type map: laps.date_start nullable — null passes, number rejected", async () => {
+  // null on lap-1 timing-line gaps (live Australian GP 2026) → nullable, not required
+  mockFetch([{ session_key: 1, driver_number: 4, lap_number: 1, lap_duration: null, date_start: null }]);
+  const rows = await getOpenF1("laps", { session_key: 1 });
+  assert.equal(rows[0].date_start, null);
+
+  mockFetch([{ session_key: 1, driver_number: 4, lap_number: 1, lap_duration: null, date_start: 123 }]);
+  await assert.rejects(
+    () => getOpenF1("laps", { session_key: 1 }),
+    (e) => isValidationError(e, /laps: bad type for date_start \(expected string\|null\)/),
+  );
+});
+
 await check("type map: malformed/missing numeric field rejected (laps.lap_number missing, string lap_duration)", async () => {
   // missing required numeric → existing REQUIRED path
   mockFetch([{ session_key: 1, driver_number: 44, lap_duration: 92.1, date_start: "2024-05-26" }]);

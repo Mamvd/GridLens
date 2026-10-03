@@ -11,8 +11,10 @@ const seasonPolicy = (year: number) => getCachePolicy(year, classifySeason(year)
 export interface SeasonPitStop {
   driver_number: number;
   session_key: number;
+  // stop_duration = stationary tyre-change seconds; lane_duration = total pit-lane time
   stop_duration: number | null;
   stop_speed: number | null;
+  lane_duration?: number | null;
 }
 export interface SeasonStint {
   driver_number: number;
@@ -295,13 +297,15 @@ export const seasonExtras = async (year: number, opts?: { signal?: AbortSignal }
     return d ? `${d.first_name} ${d.last_name}` : `#${n}`;
   };
   // Pit-stop stats (kept in SeasonStats; no view consumer today)
-  const stopAgg = new Map<string, { stops: number; total: number }>();
+  // avg divides by `timed` (non-null stop_duration count) — dividing by all
+  // stops biases low; 0 timed → null (historical sessions stay unavailable).
+  const stopAgg = new Map<string, { stops: number; total: number; timed: number }>();
   for (const r of races) {
     for (const stop of pitBySession.get(r.session_key) ?? []) {
       const name = nameOf(r.session_key, stop.driver_number);
-      const cur = stopAgg.get(name) ?? { stops: 0, total: 0 };
+      const cur = stopAgg.get(name) ?? { stops: 0, total: 0, timed: 0 };
       cur.stops++;
-      if (stop.stop_duration != null) cur.total += stop.stop_duration;
+      if (stop.stop_duration != null) { cur.total += stop.stop_duration; cur.timed++; }
       stopAgg.set(name, cur);
     }
   }
@@ -323,7 +327,7 @@ export const seasonExtras = async (year: number, opts?: { signal?: AbortSignal }
 
   return {
     pitStats: [...stopAgg.entries()]
-      .map(([driverName, v]) => ({ driverName, stops: v.stops, avgStop: v.stops ? v.total / v.stops : null }))
+      .map(([driverName, v]) => ({ driverName, stops: v.stops, avgStop: v.timed ? v.total / v.timed : null }))
       .sort((a, b) => b.stops - a.stops),
     strategyCount: [...strategyAgg.entries()].map(([strategy, count]) => ({ strategy, count })).sort((a, b) => b.count - a.count),
     stale,

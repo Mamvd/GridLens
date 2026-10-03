@@ -218,7 +218,8 @@ export const detailFields = (
       s.bestSector ? `Best S${s.bestSector.sector} ${fmtSectorTime(s.bestSector.value)}` : "Best —",
     ),
     stops: `Pit stops ${s.totalStops}`,
-    avgStop: f(phases.pit, () => `(avg ${s.avgStopTime != null ? `${s.avgStopTime.toFixed(2)}s` : "—"})`),
+    // stop_duration = stationary tyre-change seconds (not pit-lane total); null stays "—"
+    avgStop: f(phases.pit, () => `(stationary avg ${s.avgStopTime != null ? `${s.avgStopTime.toFixed(2)}s` : "—"})`),
     overtakes: f(phases.overtakes, () =>
       s.overtakesMade + s.overtakesLost > 0
         ? `Overtakes +${s.overtakesMade}/-${s.overtakesLost}`

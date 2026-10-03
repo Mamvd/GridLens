@@ -102,7 +102,8 @@ const TYPE: Record<string, Record<string, "number" | "string" | "number|null" | 
   laps: {
     lap_number: "number",
     lap_duration: "number|null",
-    date_start: "string",
+    // null on lap-1 timing-line gaps (live: 2/1002 rows, Australian GP 2026)
+    date_start: "string|null",
   },
   intervals: {
     // string forms ("+1 LAP", "Leader") are documented but rare on free tier
@@ -110,6 +111,9 @@ const TYPE: Record<string, Record<string, "number" | "string" | "number|null" | 
   },
   meetings: { date_start: "string" },
   sessions: { date_start: "string" },
+  // stop_duration (stationary) / stop_speed are legitimately null in historical
+  // sessions — typed as nullable, deliberately NOT REQUIRED.
+  pit: { stop_duration: "number|null", stop_speed: "number|null" },
 };
 
 const typeOk = (spec: string, v: unknown): boolean => {
@@ -305,8 +309,11 @@ export interface PitEvent {
   session_key: number;
   driver_number: number;
   lap_number: number;
+  // stop_duration = stationary tyre-change seconds (the metric we display);
+  // lane_duration = total pit-lane time (never used as the displayed metric)
   stop_duration: number | null;
   stop_speed: number | null;
+  lane_duration?: number | null;
 }
 
 export interface Position {

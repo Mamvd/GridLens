@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   parseInterval, fmtInterval, computeStrategies, detailFields, fmtLapTime, fmtSectorTime,
   type RaceBundle, type DetailPhase,
@@ -183,5 +184,95 @@ describe("detailFields", () => {
     expect(d.bestSector.text).toBe("Best —");
     expect(d.avgStop.text).toContain("—");
     expect(d.overtakes.text).toBe("Overtakes —");
+  });
+});
+
+// --- pit duration semantics: OpenF1 stop_duration = stationary tyre-change
+// time; lane_duration = total pit-lane time; pit_duration = deprecated.
+// The displayed metric must be stop_duration only, unavailable stays unavailable.
+describe("pit duration semantics (stop_duration only)", () => {
+  const phases = (p: DetailPhase): { laps: DetailPhase; pit: DetailPhase; overtakes: DetailPhase; grid: DetailPhase } =>
+    ({ laps: p, pit: p, overtakes: p, grid: p });
+
+  it("uses stop_duration, never lane_duration (stationary ≠ pit-lane total)", () => {
+    const b = mkBundle();
+    b.pitEvents = [
+      { session_key: 900, driver_number: 1, lap_number: 21, stop_duration: 2.4, stop_speed: null, lane_duration: 8.0 },
+    ] as RaceBundle["pitEvents"];
+    const v = computeStrategies(b).find((s) => s.driver.driver_number === 1)!;
+    expect(v.avgStopTime).toBe(2.4);
+    expect(v.avgStopTime).not.toBe(8.0);
+  });
+
+  it("missing stop_duration → unavailable, never fabricated 0", () => {
+    const b = mkBundle();
+    b.pitEvents = [
+      { session_key: 900, driver_number: 1, lap_number: 21, stop_duration: null, stop_speed: null, lane_duration: 8.0 },
+    ] as RaceBundle["pitEvents"];
+    const v = computeStrategies(b).find((s) => s.driver.driver_number === 1)!;
+    expect(v.avgStopTime).toBeNull();
+    const d = detailFields(v, phases("ready"));
+    expect(d.avgStop.text).toContain("—");
+    expect(d.avgStop.text).not.toContain("0.00");
+  });
+
+  it("stop_duration = 0 displays 0, not dropped or falsy-coerced", () => {
+    const b = mkBundle();
+    b.pitEvents = [
+      { session_key: 900, driver_number: 1, lap_number: 21, stop_duration: 0, stop_speed: null },
+    ] as RaceBundle["pitEvents"];
+    const v = computeStrategies(b).find((s) => s.driver.driver_number === 1)!;
+    expect(v.avgStopTime).toBe(0);
+    const d = detailFields(v, phases("ready"));
+    expect(d.avgStop.text).toContain("0.00s");
+  });
+
+  it("missing pit data (no pit rows) → unavailable", () => {
+    const b = mkBundle();
+    b.pitEvents = [];
+    for (const s of computeStrategies(b)) expect(s.avgStopTime).toBeNull();
+  });
+
+  it("multiple pit stops → average of non-null stop_duration values", () => {
+    const b = mkBundle();
+    b.pitEvents = [
+      { session_key: 900, driver_number: 1, lap_number: 21, stop_duration: 2.4, stop_speed: null },
+      { session_key: 900, driver_number: 1, lap_number: 35, stop_duration: 2.8, stop_speed: null },
+      { session_key: 900, driver_number: 1, lap_number: 48, stop_duration: null, stop_speed: null },
+    ] as RaceBundle["pitEvents"];
+    const v = computeStrategies(b).find((s) => s.driver.driver_number === 1)!;
+    expect(v.avgStopTime).toBeCloseTo(2.6, 10); // (2.4 + 2.8) / 2 — null not counted
+  });
+
+  it("historical session: stop_duration unavailable → unavailable, never 0", () => {
+    const b = mkBundle();
+    b.pitEvents = [
+      { session_key: 900, driver_number: 1, lap_number: 21, stop_duration: null, stop_speed: null },
+      { session_key: 900, driver_number: 1, lap_number: 35, stop_duration: null, stop_speed: null },
+    ] as RaceBundle["pitEvents"];
+    const v = computeStrategies(b).find((s) => s.driver.driver_number === 1)!;
+    expect(v.avgStopTime).toBeNull();
+    const d = detailFields(v, phases("ready"));
+    expect(d.avgStop.text).not.toContain("0.00");
+  });
+
+  it("detailFields label states stationary semantics (not pit-lane)", () => {
+    const d = detailFields(computeStrategies(mkBundle())[0], phases("ready"));
+    expect(d.avgStop.text).toContain("stationary");
+    expect(d.avgStop.text).toContain("2.40s");
+  });
+
+  it("Race.tsx pit chart labels state stationary semantics", () => {
+    // node env, no jsdom — assert the source labels directly (regression on copy)
+    const src = readFileSync(new URL("../../src/views/Race.tsx", import.meta.url), "utf8");
+    expect(src).toContain('title="Pit Stop Times (stationary');
+    expect(src).toContain('name="Avg stationary (s)"');
+    expect(src).toMatch(/srSummary="[^"]*stationary[^"]*"/);
+  });
+
+  it("Race.tsx overtake chart declares layout=\"vertical\" (missing → no bars)", () => {
+    // node env, no jsdom — assert the source directly (regression on silent empty plot)
+    const src = readFileSync(new URL("../../src/views/Race.tsx", import.meta.url), "utf8");
+    expect(src).toMatch(/<BarChart data=\{overtakeRows[\s\S]{0,300}?layout="vertical"/);
   });
 });

@@ -339,7 +339,7 @@ export const Race = ({ meeting }: Props) => {
         </div>
       )}
       <Card className="mb-6">
-        <div className="flex flex-row items-start justify-between space-y-0 pb-4">
+        <div className="flex flex-row items-start justify-between p-6">
           <div className="space-y-1">
             <Button variant="outline" onClick={() => navigate(`/season/${meeting.year}`)}>← Season</Button>
             <h2 className="text-[17px] font-semibold tracking-tight">{meeting.meeting_name}</h2>
@@ -450,7 +450,7 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
         </div>
         {fastestLap != null && (
           <div className="text-muted-foreground text-sm self-end sm:self-start">
-            · fastest lap {fmtLapTime(fastestLap)}
+            Fastest lap {fmtLapTime(fastestLap)}
           </div>
         )}
       </div>
@@ -776,11 +776,11 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
       <CardContent className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section>
           <ChartCard
-            title="Pit Stop Times (avg)"
+            title="Pit Stop Times (stationary, avg)"
             height={260}
-            srSummary="Horizontal bar chart of each driver's average pit stop time in seconds."
+            srSummary="Horizontal bar chart of each driver's average stationary pit stop time in seconds — car stopped in the box, not total pit-lane time."
           >
-            <BarChart data={pitRows.map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! }))} layout="vertical">
+            <BarChart data={pitRows.map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! }))} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
               <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
@@ -791,7 +791,7 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
                 cursor={chartTooltip.cursor}
                 formatter={(v) => (typeof v === "number" ? `${v.toFixed(2)}s` : "—")}
               />
-              <Bar dataKey="avg" fill="var(--chart-4)" name="Avg stop (s)" />
+              <Bar dataKey="avg" fill="var(--chart-4)" name="Avg stationary (s)" />
             </BarChart>
           </ChartCard>
         </section>
@@ -801,7 +801,7 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
             height={260}
             srSummary="Bar chart comparing overtakes made and overtakes lost for each driver."
           >
-            <BarChart data={overtakeRows.map((s) => ({ name: nameOfDriver(s.driver), made: s.overtakesMade, lost: s.overtakesLost }))}>
+            <BarChart data={overtakeRows.map((s) => ({ name: nameOfDriver(s.driver), made: s.overtakesMade, lost: s.overtakesLost }))} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
               <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />

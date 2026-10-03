@@ -199,7 +199,7 @@ await check("detailFields: full data renders real values", () => {
   assert.equal(d.fastestLap.text, "Fastest lap 1:32.421");
   assert.equal(d.bestSector.text, "Best S2 28.104");
   assert.equal(d.stops, "Pit stops 2");
-  assert.equal(d.avgStop.text, "(avg 2.31s)");
+  assert.equal(d.avgStop.text, "(stationary avg 2.31s)");
   assert.equal(d.overtakes.text, "Overtakes +4/-1");
   assert.ok([d.grid, d.fastestLap, d.bestSector, d.avgStop, d.overtakes].every((f) => !f.pending));
 });
@@ -232,7 +232,7 @@ await check("detailFields: loaded-but-zero data → \"—\", never fabricated 0/
   assert.equal(d.grid.text, "Grid —");
   assert.equal(d.fastestLap.text, "Fastest lap —");
   assert.equal(d.bestSector.text, "Best —");
-  assert.equal(d.avgStop.text, "(avg —)");
+  assert.equal(d.avgStop.text, "(stationary avg —)");
   assert.equal(d.overtakes.text, "Overtakes —");
   assert.equal(d.stops, "Pit stops 0"); // factual: stints loaded, 1 stint
   assert.ok([d.grid, d.fastestLap, d.bestSector, d.avgStop, d.overtakes].every((f) => !f.pending),

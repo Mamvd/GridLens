@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // scripts/points-check.mjs — assert-based season points regression checks (stdlib only).
-// Compiles src/data/season.ts, mocks fetch, runs 3 scenarios. PASS/FAIL per scenario; exit 1 on fail.
+// Compiles src/data/season.ts, mocks fetch, runs 6 scenarios. PASS/FAIL per scenario; exit 1 on fail.
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -60,6 +60,7 @@ const driversOf = (sk) => [
   { session_key: sk, driver_number: 44, first_name: "Lewis", last_name: "Hamilton", team_name: "Ferrari" },
 ];
 const meeting = (key, year) => ({ meeting_key: key, meeting_name: "Test Grand Prix", date_start: `${year}-03-02`, year });
+const driver = (sk, num, first, last, team) => ({ session_key: sk, driver_number: num, first_name: first, last_name: last, team_name: team });
 const byName = (arr) => Object.fromEntries(arr.map((x) => [x.driverName ?? x.team, x.points]));
 const RACE_ONLY_DRIVERS = { "Max Verstappen": 25, "Sergio Perez": 18, "Lando Norris": 15, "Lewis Hamilton": 12 };
 const RACE_ONLY_TEAMS = { "Red Bull Racing": 43, McLaren: 15, Ferrari: 12 };
@@ -127,6 +128,89 @@ await scenario("c. unfinished sprint: session exists, zero result rows → no th
   for (const d of stats.championship) assert.ok(Number.isFinite(d.points), `NaN driver points: ${d.driverName}`);
   for (const t of stats.teamChampionship) assert.ok(Number.isFinite(t.points), `NaN team points: ${t.team}`);
   for (const p of stats.progression) for (const r of p.racePoints) assert.ok(Number.isFinite(r.points), `NaN progression points: ${r.name}`);
+});
+
+// 2025 real case encoded below: Ricciardo (#30) RBR→Racing Bulls, Tsunoda reverse.
+await scenario("d. mid-season team swap: constructor credits per-session teams; display = final", async () => {
+  FIXTURE = {
+    sessions: [
+      { session_key: 4001, meeting_key: 401, session_name: "Race", year: 2094, session_date: "2094-03-01" },
+      { session_key: 4002, meeting_key: 402, session_name: "Race", year: 2094, session_date: "2094-04-05" },
+    ],
+    session_result: [
+      ...rows(4001, 401, [[30, 3, 10]]), // early race on team A
+      ...rows(4002, 402, [[30, 5, 5]]),  // later race on team B
+    ],
+    drivers: [
+      driver(4001, 30, "Daniel", "Ricciardo", "Red Bull Racing"),
+      driver(4002, 30, "Daniel", "Ricciardo", "Racing Bulls"),
+    ],
+    pit: [], stints: [],
+  };
+  const { stats } = await seasonBundle(2094, [meeting(401, 2094), meeting(402, 2094)]);
+  assert.deepEqual(byName(stats.teamChampionship), {
+    "Red Bull Racing": 10,
+    "Racing Bulls": 5,
+  }, "constructor: A=10, B=5 — NOT A=15 frozen first-seen");
+  const d = stats.championship.find((x) => x.driverName === "Daniel Ricciardo");
+  assert.ok(d, "driver row present");
+  assert.equal(d.points, 15, "driver total spans both teams");
+  assert.equal(d.team, "Racing Bulls", "display team = last-seen (final)");
+});
+
+await scenario("e. sprint vs race team split: sprint pts → team A, race pts → team B", async () => {
+  FIXTURE = {
+    sessions: [
+      { session_key: 5001, meeting_key: 501, session_name: "Sprint", year: 2095, session_date: "2095-06-01" },
+      { session_key: 5002, meeting_key: 501, session_name: "Race", year: 2095, session_date: "2095-06-02" },
+    ],
+    session_result: [
+      ...rows(5001, 501, [[22, 1, 8]]),  // sprint P1 on team A
+      ...rows(5002, 501, [[22, 3, 12]]), // race P3 on team B
+    ],
+    drivers: [
+      driver(5001, 22, "Yuki", "Tsunoda", "Red Bull Racing"),
+      driver(5002, 22, "Yuki", "Tsunoda", "Racing Bulls"),
+    ],
+    pit: [], stints: [],
+  };
+  const { stats } = await seasonBundle(2095, [meeting(501, 2095)]);
+  assert.deepEqual(byName(stats.teamChampionship), {
+    "Red Bull Racing": 8,
+    "Racing Bulls": 12,
+  }, "sprint 8 → team-at-sprint (A); race 12 → team-at-race (B)");
+  const d = stats.championship.find((x) => x.driverName === "Yuki Tsunoda");
+  assert.ok(d, "driver row present");
+  assert.equal(d.points, 20, "driver total = sprint + race");
+  assert.equal(d.team, "Racing Bulls", "display team = race team (last-seen)");
+});
+
+await scenario("f. one-off substitute: single race's points go to that one-off team", async () => {
+  FIXTURE = {
+    sessions: [
+      { session_key: 6001, meeting_key: 601, session_name: "Race", year: 2096, session_date: "2096-03-01" },
+      { session_key: 6002, meeting_key: 602, session_name: "Race", year: 2096, session_date: "2096-03-22" },
+    ],
+    session_result: [
+      ...rows(6001, 601, [[4, 1, 25]]),
+      ...rows(6002, 602, [[4, 2, 18], [99, 5, 6]]), // stand-in #99 one race only
+    ],
+    drivers: [
+      driver(6001, 4, "Lando", "Norris", "McLaren"),
+      driver(6002, 4, "Lando", "Norris", "McLaren"),
+      driver(6002, 99, "Felipe", "Drugovich", "Aston Martin"),
+    ],
+    pit: [], stints: [],
+  };
+  const { stats } = await seasonBundle(2096, [meeting(601, 2096), meeting(602, 2096)]);
+  assert.deepEqual(byName(stats.teamChampionship), {
+    McLaren: 43,
+    "Aston Martin": 6,
+  }, "one-off team gets only its single race's 6 pts");
+  const stand = stats.championship.find((x) => x.driverName === "Felipe Drugovich");
+  assert.ok(stand, "stand-in driver row present");
+  assert.equal(stand.points, 6);
+  assert.equal(stand.team, "Aston Martin");
 });
 
 for (const [name, status, msg] of outcomes) console.log(`${status}  ${name}${msg ? ` — ${msg}` : ""}`);

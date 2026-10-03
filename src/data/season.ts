@@ -99,8 +99,8 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
       getOpenF1<SeasonPitStop>("pit", { session_key: sks }), seasonPolicy(year)),
     cached<SeasonStint>("stints", { session_key: sks }, () =>
       getOpenF1<SeasonStint>("stints", { session_key: sks }), seasonPolicy(year)),
-    cached<RaceDriver>("drivers", { session_key: sks }, () =>
-      getOpenF1<RaceDriver>("drivers", { session_key: sks }), seasonPolicy(year)),
+    cached<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, () =>
+      getOpenF1<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }), seasonPolicy(year)),
   ]);
   const bySession = <T extends { session_key: number }>(rows: T[]) => {
     const m = new Map<number, T[]>();
@@ -119,16 +119,21 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
   const perRace = races.map((s) => ({
     sk: s.session_key,
     meetingKey: s.meeting_key,
+    date: s.session_date ?? "",
     results: resultsBySession.get(s.session_key) ?? [],
     pit: pitBySession.get(s.session_key) ?? [],
     stints: stintsBySession.get(s.session_key) ?? [],
     drivers: driversBySession.get(s.session_key) ?? [],
   }));
   // ponytail: empty/future sprints (`?? []`) contribute zero points, no crash.
+  // drivers rows fetch race+sprint keys — sprint team can differ from race team
+  // on the same weekend (per-session team is the constructor source of truth).
   const perSprint = sprints.map((s) => ({
     sk: s.session_key,
     meetingKey: s.meeting_key,
+    date: s.session_date ?? "",
     results: resultsBySession.get(s.session_key) ?? [],
+    drivers: driversBySession.get(s.session_key) ?? [],
   }));
 
   const nameOf = (meetingKey: number, n: number) => {
@@ -176,37 +181,46 @@ export const seasonBundle = async (year: number, meetings?: Meeting[]): Promise<
     }
   }
 
-  // Driver + team championship
+  // Driver + team championship — walk sessions chronologically so constructor
+  // credit and the display team follow per-session truth (mid-season swaps,
+  // sprint≠race team on the same weekend). Real 2025 case: Ricciardo RBR→RB,
+  // Tsunoda RB→RBR; frozen first-seen misattributed both.
+  // ponytail: wins/podiums/dnf stay Race-only — sprint adds points only
+  // (upgrade: sprint-win countback for official tie-breaks).
   const perDriver = new Map<string, DriverChampionship>();
-  for (const p of perRace) {
-    for (const r of p.results.filter((r) => r.driver_number)) {
-      const name = nameOf(p.meetingKey, r.driver_number!);
-      const cur = perDriver.get(name) ?? {
-        driverName: name, team: teamOf(p.meetingKey, r.driver_number!),
-        points: 0, wins: 0, podiums: 0, dnf: 0,
-      };
-      cur.points += r.points ?? 0;
-      if (r.position === 1) cur.wins++;
-      if (r.position >= 1 && r.position <= 3) cur.podiums++;
-      if (r.dnf) cur.dnf++;
-      perDriver.set(name, cur);
-    }
-  }
-  // ponytail: sprint results add points ONLY — wins/podiums/dnf stay
-  // Race-based (upgrade: sprint-win countback for official tie-breaks).
-  for (const sp of perSprint) {
-    for (const r of sp.results.filter((r) => r.driver_number)) {
-      const name = nameOf(sp.meetingKey, r.driver_number!);
-      const cur = perDriver.get(name) ?? {
-        driverName: name, team: teamOf(sp.meetingKey, r.driver_number!),
-        points: 0, wins: 0, podiums: 0, dnf: 0,
-      };
-      cur.points += r.points ?? 0;
-      perDriver.set(name, cur);
-    }
-  }
+  const lastTeam = new Map<string, string>();
   const teamPts = new Map<string, number>();
-  perDriver.forEach((v) => teamPts.set(v.team, (teamPts.get(v.team) ?? 0) + v.points));
+  const sessionsChrono = [
+    ...perRace.map((p) => ({ date: p.date, meetingKey: p.meetingKey, drivers: p.drivers, results: p.results, sprint: false })),
+    ...perSprint.map((p) => ({ date: p.date, meetingKey: p.meetingKey, drivers: p.drivers, results: p.results, sprint: true })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  for (const s of sessionsChrono) {
+    for (const r of s.results.filter((r) => r.driver_number)) {
+      // per-session team: that session's drivers row wins; meeting-level race
+      // drivers are the fallback when a sprint session has no drivers rows.
+      const team = s.drivers.find((d) => d.driver_number === r.driver_number)?.team_name
+        ?? teamOf(s.meetingKey, r.driver_number!);
+      const name = nameOf(s.meetingKey, r.driver_number!);
+      const cur = perDriver.get(name) ?? {
+        driverName: name, team,
+        points: 0, wins: 0, podiums: 0, dnf: 0,
+      };
+      cur.points += r.points ?? 0;
+      if (!s.sprint) {
+        if (r.position === 1) cur.wins++;
+        if (r.position >= 1 && r.position <= 3) cur.podiums++;
+        if (r.dnf) cur.dnf++;
+      }
+      perDriver.set(name, cur);
+      lastTeam.set(name, team); // chronological walk → last-seen = final team
+      teamPts.set(team, (teamPts.get(team) ?? 0) + (r.points ?? 0));
+    }
+  }
+  // display team = last-seen across the season (final team after swaps)
+  for (const v of perDriver.values()) {
+    const t = lastTeam.get(v.driverName);
+    if (t) v.team = t;
+  }
 
   // Pit-stop stats
   const stopAgg = new Map<string, { stops: number; total: number }>();

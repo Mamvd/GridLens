@@ -10,6 +10,7 @@ import {
 import { raceIsUnrun } from "../data/race";
 import type { Meeting } from "../api/openf1";
 import { slugForMeeting } from "../lib/slug";
+import { resourcePhase } from "../lib/resource-state";
 import { ChartCard, ChartTooltip } from "@/components/charts/ChartCard";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -81,9 +82,11 @@ const StageError = ({ message, error, onRetry }: { message: string; error: strin
 );
 
 // one section slot bound to one stage: failed → its error card, loading →
-// skeleton, ready → cached note (when stale) + content
+// skeleton, ready with 0 rows → emptyMessage (stale note still shows),
+// ready with rows → cached note (when stale) + content. Phases from
+// resourcePhase so finished-but-empty never sits as a skeleton.
 const StageSlot = ({
-  status, error, stale, message, onRetry, skeleton, children,
+  status, error, stale, message, onRetry, skeleton, rowCount, emptyMessage, children,
 }: {
   status: StageStatus;
   error: string;
@@ -91,10 +94,28 @@ const StageSlot = ({
   message: string;
   onRetry: () => void;
   skeleton: ReactNode;
+  rowCount?: number;
+  emptyMessage?: string;
   children: ReactNode;
 }) => {
-  if (status === "failed") return <StageError message={message} error={error} onRetry={onRetry} />;
-  if (status === "loading") return <>{skeleton}</>;
+  const phase = resourcePhase(
+    [{
+      loading: status === "loading",
+      error: status === "failed" ? error : undefined,
+      data: status === "ready" ? children : undefined,
+    }],
+    rowCount ?? 1, // no emptyMessage → "empty" unreachable
+  );
+  if (phase === "error") return <StageError message={message} error={error} onRetry={onRetry} />;
+  if (phase === "loading") return <>{skeleton}</>;
+  if (phase === "empty") {
+    return (
+      <>
+        {stale && <CachedNote />}
+        <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+      </>
+    );
+  }
   return (
     <>
       {stale && <CachedNote />}
@@ -243,6 +264,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
           status={coreStatus} error={coreError} stale={coreStale}
           message={`Failed to load the ${year} championship data.`}
           onRetry={retryCore} skeleton={<ChartSkeleton />}
+          rowCount={coreData?.championship.length ?? 0} emptyMessage="No results yet."
         >
           <ChartCard title="Drivers' championship" subtitle="Top 10 cumulative points">
             <LineChart data={standingsSeries.rows}>
@@ -283,6 +305,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
               status={coreStatus} error={coreError} stale={coreStale}
               message={`Failed to load the ${year} championship data.`}
               onRetry={retryCore} skeleton={<ChartSkeleton />}
+              rowCount={topTeams.length} emptyMessage="No team data yet."
             >
               <ChartCard title="Constructors' championship" subtitle="Top 10 teams">
                 <BarChart data={topTeams}>
@@ -307,6 +330,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
             status={extrasStatus} error={extrasError} stale={extrasStale}
             message={`Failed to load the ${year} strategy data.`}
             onRetry={retryExtras} skeleton={<ChartSkeleton />}
+            rowCount={topStrategies.length} emptyMessage="No strategy data yet."
           >
             <ChartCard title="Most common strategies" subtitle="Compound sequences across the season">
               <BarChart data={topStrategies} layout="vertical">
@@ -337,6 +361,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
             status={coreStatus} error={coreError} stale={coreStale}
             message={`Failed to load the ${year} championship data.`}
             onRetry={retryCore}
+            rowCount={coreData?.championship.length ?? 0} emptyMessage="No results yet."
             skeleton={
               <Card>
                 <CardContent className="space-y-3 pt-6">

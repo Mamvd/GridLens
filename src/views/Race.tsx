@@ -16,6 +16,7 @@ import type {
 } from "../api/openf1";
 import { seasonRaceSessions } from "../data/season";
 import { formatRaceDateRange } from "../lib/dates";
+import { resourcePhase } from "../lib/resource-state";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -70,14 +71,18 @@ const RES_LABEL: Partial<Record<RaceResKey, string>> = {
 };
 
 // per-tab gate: ONLY this tab's resources decide loading/error — a failed
-// slice never blocks the other tabs.
-const TabGate = ({ tab, res, chartHeight, onRetry, children }: {
+// slice never blocks the other tabs. rowCount = this tab's derived rows once
+// its resources finish: 0 rows renders emptyMessage, never a skeleton.
+const TabGate = ({ tab, res, chartHeight, onRetry, rowCount, emptyMessage, children }: {
   tab: Tab; res: ResState; chartHeight: number;
-  onRetry: (keys: RaceResKey[]) => void; children: ReactNode;
+  onRetry: (keys: RaceResKey[]) => void;
+  rowCount: number; emptyMessage: string;
+  children: ReactNode;
 }) => {
   const needs = TAB_RESOURCES[tab];
-  const failed = needs.filter((k) => res[k].error);
-  if (failed.length > 0) {
+  const phase = resourcePhase(needs.map((k) => res[k]), rowCount);
+  if (phase === "error") {
+    const failed = needs.filter((k) => res[k].error);
     return (
       <Card className="border-destructive/50 bg-destructive/10">
         <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
@@ -89,8 +94,15 @@ const TabGate = ({ tab, res, chartHeight, onRetry, children }: {
       </Card>
     );
   }
-  if (needs.some((k) => res[k].loading || res[k].data === undefined)) {
-    return <LoadSkeleton chartHeight={chartHeight} />;
+  if (phase === "loading") return <LoadSkeleton chartHeight={chartHeight} />;
+  if (phase === "empty") {
+    return (
+      <Card>
+        <CardContent className="p-6 text-center">
+          <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+        </CardContent>
+      </Card>
+    );
   }
   return <>{children}</>;
 };
@@ -326,7 +338,10 @@ export const Race = ({ meeting }: Props) => {
           ))}
         </TabsList>
         <TabsContent value="pace">
-          <TabGate tab="pace" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+          <TabGate
+            tab="pace" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+            rowCount={bundle.laps.length} emptyMessage="No lap data available for this race."
+          >
             <PaceTab
               bundle={bundle}
               strategies={strategies}
@@ -337,7 +352,10 @@ export const Race = ({ meeting }: Props) => {
           </TabGate>
         </TabsContent>
         <TabsContent value="gaps">
-          <TabGate tab="gaps" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+          <TabGate
+            tab="gaps" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+            rowCount={bundle.intervals.length} emptyMessage="No gap data available for this race."
+          >
             <GapsTab
               bundle={bundle}
               refDriver={refDriver}
@@ -349,12 +367,18 @@ export const Race = ({ meeting }: Props) => {
           </TabGate>
         </TabsContent>
         <TabsContent value="strategy">
-          <TabGate tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+          <TabGate
+            tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+            rowCount={strategies.length} emptyMessage="No strategy data available for this race."
+          >
             <StrategyTab strategies={strategies} />
           </TabGate>
         </TabsContent>
         <TabsContent value="pit">
-          <TabGate tab="pit" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+          <TabGate
+            tab="pit" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+            rowCount={strategies.length} emptyMessage="No pit stop data available for this race."
+          >
             <PitTab strategies={strategies} />
           </TabGate>
         </TabsContent>
@@ -376,21 +400,25 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between sm:space-x-4">
         <div className="space-y-1">
           <label className="text-muted-foreground text-sm">Driver</label>
-          <Select
-            value={refDriver != null ? String(refDriver) : undefined}
-            onValueChange={(v) => setRefDriver(v ? +v : null)}
-          >
-            <SelectTrigger className="w-[200px] sm:w-auto">
-              <SelectValue placeholder="—" />
-            </SelectTrigger>
-            <SelectContent>
-              {bundle.drivers.map((d) => (
-                <SelectItem key={d.driver_number} value={String(d.driver_number)}>
-                  {nameOfDriver(d)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {bundle.drivers.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No driver data yet.</p>
+          ) : (
+            <Select
+              value={refDriver != null ? String(refDriver) : undefined}
+              onValueChange={(v) => setRefDriver(v ? +v : null)}
+            >
+              <SelectTrigger className="w-[200px] sm:w-auto">
+                <SelectValue placeholder="—" />
+              </SelectTrigger>
+              <SelectContent>
+                {bundle.drivers.map((d) => (
+                  <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+                    {nameOfDriver(d)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
         {fastestLap != null && (
           <div className="text-muted-foreground text-sm self-end sm:self-start">
@@ -505,47 +533,51 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
 
   return (
     <section className="space-y-4">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <div className="space-y-1">
-          <label className="text-muted-foreground text-sm">Driver</label>
-          <Select
-            value={refDriver != null ? String(refDriver) : undefined}
-            onValueChange={(v) => setRefDriver(v ? +v : null)}
-          >
-            <SelectTrigger className="w-[200px] sm:w-auto">
-              <SelectValue placeholder="—" />
-            </SelectTrigger>
-            <SelectContent>
-              {bundle.drivers.map((d) => (
-                <SelectItem key={d.driver_number} value={String(d.driver_number)}>
-                  {nameOfDriver(d)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1">
-          <label className="text-muted-foreground text-sm">Compare driver</label>
-          <Select
-            value={rivalDriver != null ? String(rivalDriver) : undefined}
-            onValueChange={(v) => setRivalDriver(v ? +v : null)}
-          >
-            <SelectTrigger className="w-[200px] sm:w-auto">
-              <SelectValue placeholder="—" />
-            </SelectTrigger>
-            <SelectContent>
-              {/* exclude the ref driver — identical selection is meaningless */}
-              {bundle.drivers
-                .filter((d) => d.driver_number !== refDriver)
-                .map((d) => (
+      {bundle.drivers.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No driver data yet.</p>
+      ) : (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="space-y-1">
+            <label className="text-muted-foreground text-sm">Driver</label>
+            <Select
+              value={refDriver != null ? String(refDriver) : undefined}
+              onValueChange={(v) => setRefDriver(v ? +v : null)}
+            >
+              <SelectTrigger className="w-[200px] sm:w-auto">
+                <SelectValue placeholder="—" />
+              </SelectTrigger>
+              <SelectContent>
+                {bundle.drivers.map((d) => (
                   <SelectItem key={d.driver_number} value={String(d.driver_number)}>
                     {nameOfDriver(d)}
                   </SelectItem>
                 ))}
-            </SelectContent>
-          </Select>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-muted-foreground text-sm">Compare driver</label>
+            <Select
+              value={rivalDriver != null ? String(rivalDriver) : undefined}
+              onValueChange={(v) => setRivalDriver(v ? +v : null)}
+            >
+              <SelectTrigger className="w-[200px] sm:w-auto">
+                <SelectValue placeholder="—" />
+              </SelectTrigger>
+              <SelectContent>
+                {/* exclude the ref driver — identical selection is meaningless */}
+                {bundle.drivers
+                  .filter((d) => d.driver_number !== refDriver)
+                  .map((d) => (
+                    <SelectItem key={d.driver_number} value={String(d.driver_number)}>
+                      {nameOfDriver(d)}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-      </div>
+      )}
       <p className="muted small">Gap to the car ahead (intervals). Negative = behind / being lapped.</p>
       <ChartCard title="Gap to Car Ahead" height={chartHeight}>
         <LineChart data={chartData}>
@@ -581,20 +613,8 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
 };
 
 // ---- Strategy: compound sequence + stops per driver ----
+// empty (0 strategies) never reaches here: TabGate renders the empty message.
 const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => {
-  if (!strategies || strategies.length === 0) {
-    return (
-      <Card className="w-full">
-        <CardHeader>
-          <CardTitle className="text-sm font-semibold">Driver Strategies</CardTitle>
-        </CardHeader>
-        <CardContent className="h-[320px] flex items-center justify-center">
-          <Skeleton className="w-full h-4" />
-        </CardContent>
-      </Card>
-    );
-  }
-
   return (
     <Card className="w-full">
       <CardHeader className="mb-4">
@@ -638,18 +658,8 @@ const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStra
 };
 
 // ---- Pit: stop-time + overtakes leaderboard ----
+// empty (0 strategies) never reaches here: TabGate renders the empty message.
 const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => {
-  if (!strategies || strategies.length === 0) {
-    return (
-      <Card className="w-full">
-        <CardContent className="grid grid-cols-2 gap-4">
-          <Skeleton className="h-[260px]" />
-          <Skeleton className="h-[260px]" />
-        </CardContent>
-      </Card>
-    );
-  }
-
   const pitRows = strategies
     .filter((s) => s.avgStopTime != null)
     .sort((a, b) => (a.avgStopTime! - b.avgStopTime!));

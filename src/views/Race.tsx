@@ -399,7 +399,7 @@ export const Race = ({ meeting }: Props) => {
             tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}
             rowCount={strategies.length} emptyMessage="No strategy data available for this race."
           >
-            <StrategyTab strategies={strategies} res={res} onExpand={ensureDetail} />
+            <StrategyTab strategies={strategies} res={res} onExpand={ensureDetail} onRetryDetail={ensureDetail} />
           </TabGate>
         </TabsContent>
         <TabsContent value="pit">
@@ -652,10 +652,11 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
 // empty (0 strategies) never reaches here: TabGate renders the empty message.
 // Row = <button> (Tab/Enter/Space expand). Detail loads laps/pit/overtakes/grid
 // on demand via onExpand → startLoad (cache-deduped, gen-guarded).
-const StrategyTab = ({ strategies, res, onExpand }: {
+const StrategyTab = ({ strategies, res, onExpand, onRetryDetail }: {
   strategies: ReturnType<typeof computeStrategies>;
   res: ResState;
   onExpand: () => void;
+  onRetryDetail: () => void;
 }) => {
   const [openDriver, setOpenDriver] = useState<number | null>(null);
   const phase = (k: RaceResKey): DetailPhase => {
@@ -671,6 +672,7 @@ const StrategyTab = ({ strategies, res, onExpand }: {
     overtakes: phase("overtakes"), grid: phase("grid"),
   };
   const anyPending = Object.values(detailPhases).some((p) => p === "pending");
+  const anyError = DETAIL_RESOURCES.some((k) => res[k].error);
 
   return (
     <Card className="w-full">
@@ -737,6 +739,12 @@ const StrategyTab = ({ strategies, res, onExpand }: {
                         <Skeleton className="h-3 w-14" />
                         loading details…
                       </p>
+                    )}
+                    {anyError && (
+                      <div className="flex items-center gap-2 text-xs text-destructive">
+                        <span>Details unavailable</span>
+                        <Button variant="outline" size="sm" className="h-6 px-2 text-xs" onClick={onRetryDetail}>Retry</Button>
+                      </div>
                     )}
                     <p>{d.place}</p>
                     <p>{fld(d.grid)} → {d.finish}</p>

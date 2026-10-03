@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   rangeLimit, matchesSearch, chartSelect, teammateDashed, fallbackPalette, ensureVisible,
+  FALLBACK_HUES,
 } from "../../src/lib/chart-select";
 
 describe("rangeLimit", () => {
@@ -74,6 +75,46 @@ describe("fallbackPalette + ensureVisible", () => {
     const b = fallbackPalette(["McLaren", "Ferrari", "Red Bull"]);
     expect(a["Red Bull"]).toBe(b["Red Bull"]);
     expect(a["Ferrari"]).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
+  it("11 real 2026 teams return (regression: infinite probe hang)", () => {
+    const teams = [
+      "Alpine", "Aston Martin", "Audi", "Cadillac", "Ferrari", "Haas F1 Team",
+      "McLaren", "Mercedes", "Racing Bulls", "Red Bull Racing", "Williams",
+    ];
+    const p = fallbackPalette(teams);
+    expect(Object.keys(p)).toHaveLength(11);
+    for (const t of teams) expect(FALLBACK_HUES).toContain(p[t]);
+  });
+
+  it("≤10 teams keep unique hues", () => {
+    const p = fallbackPalette([
+      "Alpine", "Aston Martin", "Audi", "Cadillac", "Ferrari",
+      "Haas F1 Team", "McLaren", "Mercedes", "Racing Bulls", "Williams",
+    ]);
+    expect(new Set(Object.values(p)).size).toBe(10);
+  });
+
+  it("deterministic and order-independent", () => {
+    const teams = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"];
+    const a = fallbackPalette(teams);
+    const b = fallbackPalette([...teams]);
+    const c = fallbackPalette([...teams].reverse());
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
+  });
+
+  it("20 synthetic teams all mapped, terminates", () => {
+    const teams = Array.from({ length: 20 }, (_, i) => `Team ${i}`);
+    const p = fallbackPalette(teams);
+    expect(Object.keys(p)).toHaveLength(20);
+    for (const t of teams) expect(FALLBACK_HUES).toContain(p[t]);
+  });
+
+  it("duplicate team names collapse to one entry", () => {
+    const p = fallbackPalette(["Ferrari", "McLaren", "Ferrari", "McLaren"]);
+    expect(Object.keys(p)).toHaveLength(2);
+    expect(Object.values(p).every((v) => FALLBACK_HUES.includes(v as never))).toBe(true);
   });
 
   it("near-black hex is lifted toward the stroke floor", () => {

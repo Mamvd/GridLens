@@ -84,15 +84,17 @@ const djb2 = (s: string): number => {
 };
 
 // team → hue: sorted iteration + linear probe → deterministic for any input
-// order, no collisions up to 10 teams. ponytail: >10 teams wrap hues (the
-// palette is adjacent-pair validated, not all-pairs) — extend FALLBACK_HUES
-// + re-run validate_palette.js when the grid exceeds 10 constructors.
+// order, no collisions up to 10 teams. ponytail: >10 teams reuse hues (probe
+// stops after one full cycle, wrapping to an already-used slot — the palette
+// is adjacent-pair validated, not all-pairs) — extend FALLBACK_HUES +
+// re-run validate_palette.js when the grid exceeds 10 constructors.
 export const fallbackPalette = (teams: readonly string[]): Record<string, string> => {
   const out: Record<string, string> = {};
   const used = new Set<number>();
   for (const team of [...new Set(teams)].sort()) {
     let slot = djb2(team) % FALLBACK_HUES.length;
-    while (used.has(slot)) slot = (slot + 1) % FALLBACK_HUES.length;
+    for (let steps = 0; steps < FALLBACK_HUES.length && used.has(slot); steps++)
+      slot = (slot + 1) % FALLBACK_HUES.length;
     used.add(slot);
     out[team] = FALLBACK_HUES[slot];
   }

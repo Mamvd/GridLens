@@ -3,7 +3,7 @@ import {
   type Driver, type Lap, type Interval, type Stint, type PitEvent,
   type SessionResult, type Overtake, type StartingGrid,
 } from "../api/openf1";
-import { cached, classifySeason, getCachePolicy } from "../api/cache";
+import { cached, classifySeason, getCachePolicy, LIVE_DATA_ENABLED } from "../api/cache";
 
 // ponytail: API has no display-name field — compose first+last; keep one helper,
 // add shared formatter in lib/ if a third call site needs styling.
@@ -39,7 +39,8 @@ export const loadRaceBundle = async (
   // ponytail: default in-progress when year omitted — short TTL is the safe
   // default for unknown recency. Upgrade path = pass the actual session
   // date_end from the session rows already in memory to detect live precisely.
-  const status = live ? "live" : year == null ? "in-progress" : classifySeason(year);
+  // live=true only takes effect when LIVE_DATA_ENABLED (free tier has no real-time).
+  const status = LIVE_DATA_ENABLED && live ? "live" : year == null ? "in-progress" : classifySeason(year);
   const policy = getCachePolicy(year ?? new Date().getFullYear(), status);
     const [driversRes, lapsRes, intervalsRes, stintsRes, pitRes, resultsRes, overtakesRes, grid] =
     await Promise.all([

@@ -7,6 +7,10 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import assert from "node:assert";
 import { rmSync, mkdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const OUT = "/tmp/cachecheck";
 rmSync(OUT, { recursive: true, force: true });
@@ -35,7 +39,7 @@ store.set("gridlens:openf1:drivers?session_key=1", JSON.stringify([{ old: true }
 
 const require = createRequire(import.meta.url);
 const {
-  cached, cacheKey, getCachePolicy, classifySeason,
+  cached, cacheKey, getCachePolicy, classifySeason, LIVE_DATA_ENABLED,
   CURRENT_SEASON_TTL_MS, __resetCacheForTests,
 } = require(`${OUT}/api/cache.js`);
 
@@ -211,6 +215,48 @@ await check("stale-if-error: AbortError never rescued even with primed entry", a
     (e) => e.name === "AbortError",
     "AbortError must rethrow, not fall back to stale data",
   );
+});
+
+await check("LIVE_DATA_ENABLED=false gates live=true → in-progress persist, not live", async () => {
+  assert.equal(LIVE_DATA_ENABLED, false, "flag must ship off");
+  // compile race.ts graph (pulls api/openf1 + api/cache) to CJS
+  const RACE_OUT = "/tmp/cachecheck-race";
+  rmSync(RACE_OUT, { recursive: true, force: true });
+  mkdirSync(RACE_OUT, { recursive: true });
+  execFileSync("node_modules/.bin/tsc", [
+    "src/data/race.ts",
+    "--ignoreConfig", "--ignoreDeprecations", "6.0",
+    "--module", "commonjs", "--target", "es2022",
+    "--esModuleInterop", "--skipLibCheck",
+    "--rootDir", "src", "--outDir", RACE_OUT,
+  ], { cwd: ROOT, stdio: "inherit" });
+  const { loadRaceBundle } = require(`${RACE_OUT}/data/race.js`);
+  assert.equal(typeof loadRaceBundle, "function", "loadRaceBundle export missing");
+
+  // mock global fetch — openf1 limiter (pLimit 4 + 500 ms spacing) still runs
+  const fetchLog = [];
+  globalThis.fetch = async (url) => {
+    fetchLog.push(String(url));
+    await new Promise((r) => setTimeout(r, 5));
+    return { ok: true, status: 200, json: async () => [], text: async () => "[]" };
+  };
+  const countDrivers = () => fetchLog.filter((u) => u.includes("/drivers?")).length;
+
+  __resetCacheForTests();
+  store.clear();
+  const sk = 990001;
+  const b1 = await loadRaceBundle(sk, nowYear, true); // live=true, flag off
+  assert.ok(b1, "bundle loads");
+  assert.equal(b1.sessionKey, sk);
+  // in-progress path persists to localStorage; live path would leave LS empty
+  const dKey = cacheKey("drivers", { session_key: sk });
+  assert.ok(store.has(dKey), "live=true with flag off must take in-progress persist path");
+  const n1 = countDrivers();
+  assert.equal(n1, 1, "first call fetches drivers once");
+  // second call: in-progress TTL → cache hit; live path would refetch every call
+  await loadRaceBundle(sk, nowYear, true);
+  const n2 = countDrivers();
+  assert.equal(n2, 1, "second call must cache-hit — live refetch path not taken");
 });
 
 if (failed) {

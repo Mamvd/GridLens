@@ -10,6 +10,7 @@ const LS_PREFIX = "gridlens:v2:openf1:";
 const LEGACY_PREFIXES = ["openf1:", "gridlens:"]; // anything not LS_PREFIX
 
 export const CURRENT_SEASON_TTL_MS = 15 * 60 * 1000;
+export const LIVE_DATA_ENABLED = false; // ponytail: OpenF1 free tier serves no real-time data — flip only when a paid real-time source exists.
 
 export type CacheStatus = "completed" | "in-progress" | "live";
 export interface CachePolicy {

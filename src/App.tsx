@@ -45,15 +45,17 @@ const NotFound = () => (
 
 // #9: meetings fetch failed with no cached entry — never "No races found".
 // Raw error text stays out of the copy (title attr only).
-// restricted: API is reachable but 401-locked during a live F1 session —
-// different truth than "unable to reach", so different copy.
+// The live-session 401 lockout is CORS-opaque in browsers (no ACAO header →
+// "Failed to fetch"), so the default copy names it as a possibility; the
+// restricted branch only fires when the body IS readable (CORS headers on 401,
+// or non-browser env) — kept because it is strictly more accurate when reachable.
 const MeetingsErrorCard = ({ year, restricted, onRetry }: { year: number; restricted?: boolean; onRetry: () => void }) => (
   <Card className="border-destructive/50 bg-destructive/10">
     <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
       <p className="text-[13px] text-destructive">
         {restricted
           ? "OpenF1 is temporarily restricting free access while a live F1 session is in progress — data for all seasons is unavailable until it ends."
-          : <>Unable to reach OpenF1. The {year} season could not be loaded.</>}
+          : `OpenF1 could not be reached, so the ${year} season couldn't be loaded. This usually means you're offline, or OpenF1 is temporarily restricting free access — for example while a live F1 session is in progress. Check your connection and try again in a bit.`}
       </p>
       <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
     </CardContent>

@@ -32,8 +32,9 @@ globalThis.localStorage = {
 
 const require = createRequire(import.meta.url);
 const {
-  loadRaceBase, loadLaps, loadIntervals, loadStints, loadPit, loadOvertakes,
-  missingResources, TAB_RESOURCES,
+  loadRaceBase, loadLaps, loadIntervals, loadStints, loadPit, loadOvertakes, loadGrid,
+  missingResources, TAB_RESOURCES, DETAIL_RESOURCES, missingDetail, detailFields,
+  fmtSectorTime,
 } = require(`${OUT}/data/race.js`);
 
 // mock fetch — logs every resource requested; injectable failures
@@ -67,6 +68,7 @@ const LOADER = {
   stints: (sk) => loadStints(sk, YEAR),
   pit: (sk) => loadPit(sk, YEAR),
   overtakes: (sk) => loadOvertakes(sk, YEAR),
+  grid: (sk) => loadGrid(sk, YEAR),
 };
 const unique = () => [...new Set(fetched)];
 
@@ -141,6 +143,108 @@ await check("TAB_RESOURCES map matches spec", () => {
   assert.deepEqual(TAB_RESOURCES.gaps, ["intervals"]);
   assert.deepEqual(TAB_RESOURCES.strategy, ["stints"]);
   assert.deepEqual(TAB_RESOURCES.pit, ["stints", "pit", "overtakes"]);
+});
+
+// --- #14: on-demand detail resources (grid/laps/overtakes/pit) ---
+
+// (6) strategy tab request set unchanged — detail keys stay out of it
+await check("strategy tab fetches only stints (grid/overtakes/laps/pit stay on-demand)", async () => {
+  const sk = 71005;
+  fetched.length = 0;
+  assert.deepEqual(missingResources("strategy", () => false), ["stints"]);
+  await runTab(sk, "strategy", new Set(["drivers", "results"]));
+  assert.deepEqual(unique(), ["stints"], `unexpected: ${unique().join(",")}`);
+  for (const absent of ["starting_grid", "overtakes", "laps", "pit", "intervals"]) {
+    assert.ok(!fetched.includes(absent), `${absent} must NOT be fetched by the strategy tab`);
+  }
+  // DETAIL_RESOURCES is exactly the documented set
+  assert.deepEqual([...DETAIL_RESOURCES].sort(), ["grid", "laps", "overtakes", "pit"]);
+});
+
+// (7) expand with missing detail → exactly those keys fetched
+await check("detail expand fetches exactly the missing detail keys", async () => {
+  const sk = 71006;
+  const has = new Set(["drivers", "results", "stints"]); // strategy tab open
+  fetched.length = 0;
+  const missing = missingDetail((k) => has.has(k));
+  assert.deepEqual([...missing].sort(), ["grid", "laps", "overtakes", "pit"]);
+  for (const k of missing) await LOADER[k](sk);
+  // "grid" key maps to the starting_grid API resource
+  assert.deepEqual(unique().sort(), ["laps", "overtakes", "pit", "starting_grid"],
+    `unexpected: ${unique().join(",")}`);
+});
+
+// (8) expand with everything already loaded → zero requests
+await check("detail expand with everything loaded issues zero requests", async () => {
+  const sk = 71006; // same session as (7) → memory cache warm
+  fetched.length = 0;
+  assert.deepEqual(missingDetail(() => true), [], "nothing missing when has() is always true");
+  for (const k of DETAIL_RESOURCES) await LOADER[k](sk); // direct loader → cache hit
+  assert.equal(fetched.length, 0, `refetched: ${fetched.join(",")}`);
+});
+
+// (9) detail field rendering: full / partial-pending / no-data
+await check("detailFields: full data renders real values", () => {
+  const full = {
+    finishPosition: 1, points: 25, totalStops: 2, avgStopTime: 2.31,
+    fastestLap: 92.421, bestSector: { sector: 2, value: 28.104, lap: 40 },
+    overtakesMade: 4, overtakesLost: 1, gridPosition: 3,
+  };
+  const ready = { laps: "ready", pit: "ready", overtakes: "ready", grid: "ready" };
+  const d = detailFields(full, ready);
+  assert.equal(d.place, "P1 · +25 pts");
+  assert.equal(d.grid.text, "Grid P3");
+  assert.equal(d.grid.pending, false);
+  assert.equal(d.finish, "Finish P1");
+  assert.equal(d.fastestLap.text, "Fastest lap 1:32.421");
+  assert.equal(d.bestSector.text, "Best S2 28.104");
+  assert.equal(d.stops, "Pit stops 2");
+  assert.equal(d.avgStop.text, "(avg 2.31s)");
+  assert.equal(d.overtakes.text, "Overtakes +4/-1");
+  assert.ok([d.grid, d.fastestLap, d.bestSector, d.avgStop, d.overtakes].every((f) => !f.pending));
+});
+
+await check("detailFields: pending resources mark only their fields pending", () => {
+  const s = {
+    finishPosition: 2, points: 18, totalStops: 1, avgStopTime: 2.5,
+    fastestLap: 93, bestSector: { sector: 1, value: 30, lap: 5 },
+    overtakesMade: 1, overtakesLost: 0, gridPosition: 5,
+  };
+  const d = detailFields(s, { laps: "pending", pit: "ready", overtakes: "pending", grid: "ready" });
+  assert.equal(d.fastestLap.pending, true, "laps pending → fastestLap skeleton");
+  assert.equal(d.bestSector.pending, true, "laps pending → bestSector skeleton");
+  assert.equal(d.overtakes.pending, true);
+  assert.equal(d.grid.pending, false);
+  assert.equal(d.avgStop.pending, false);
+  assert.equal(d.place, "P2 · +18 pts", "base fields never pending");
+  assert.equal(d.grid.text, "Grid P5");
+});
+
+await check("detailFields: loaded-but-zero data → \"—\", never fabricated 0/none", () => {
+  const none = {
+    finishPosition: 8, points: null, totalStops: 0, avgStopTime: null,
+    fastestLap: null, bestSector: null,
+    overtakesMade: 0, overtakesLost: 0, gridPosition: null,
+  };
+  const ready = { laps: "ready", pit: "ready", overtakes: "ready", grid: "ready" };
+  const d = detailFields(none, ready);
+  assert.equal(d.place, "P8");
+  assert.equal(d.grid.text, "Grid —");
+  assert.equal(d.fastestLap.text, "Fastest lap —");
+  assert.equal(d.bestSector.text, "Best —");
+  assert.equal(d.avgStop.text, "(avg —)");
+  assert.equal(d.overtakes.text, "Overtakes —");
+  assert.equal(d.stops, "Pit stops 0"); // factual: stints loaded, 1 stint
+  assert.ok([d.grid, d.fastestLap, d.bestSector, d.avgStop, d.overtakes].every((f) => !f.pending),
+    "ready-empty must not read as pending");
+});
+
+await check("fmtSectorTime: bare seconds under 60, lap format above", () => {
+  assert.equal(fmtSectorTime(28.104), "28.104");
+  assert.equal(fmtSectorTime(92.421), "1:32.421");
+  assert.equal(fmtSectorTime(null), "—");
+  assert.equal(fmtSectorTime(undefined), "—");
+  assert.equal(fmtSectorTime(NaN), "—");
 });
 
 if (failed) {

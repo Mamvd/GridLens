@@ -69,11 +69,19 @@ export const loadPit = (sessionKey: number, year?: number, live?: boolean) =>
   raceRes<PitEvent>("pit", sessionKey, year, live);
 export const loadOvertakes = (sessionKey: number, year?: number, live?: boolean) =>
   raceRes<Overtake>("overtakes", sessionKey, year, live);
+export const loadGrid = (sessionKey: number, year?: number, live?: boolean) =>
+  raceRes<StartingGrid>("starting_grid", sessionKey, year, live);
 
 // --- tab → resource map (shared by Race.tsx and race-loading-check.mjs) ---
 // base (drivers + results) always loads immediately; these are the extras.
 export type TabName = "pace" | "gaps" | "strategy" | "pit";
-export type RaceResKey = "drivers" | "results" | "laps" | "intervals" | "stints" | "pit" | "overtakes";
+export type RaceResKey = "drivers" | "results" | "laps" | "intervals" | "stints" | "pit" | "overtakes" | "grid";
+
+// detail-card extras (#14) — on-demand only, NEVER in TAB_RESOURCES: the
+// default per-tab request sets stay byte-identical to #7.
+export const DETAIL_RESOURCES: readonly RaceResKey[] = ["laps", "pit", "overtakes", "grid"];
+export const missingDetail = (has: (k: RaceResKey) => boolean): RaceResKey[] =>
+  DETAIL_RESOURCES.filter((k) => !has(k));
 
 export const TAB_RESOURCES: Record<TabName, readonly RaceResKey[]> = {
   pace: ["laps"],
@@ -208,6 +216,54 @@ export const fmtLapTime = (secs: number | null | undefined): string => {
   const m = Math.floor(secs / 60);
   const s = secs - m * 60;
   return `${m}:${s.toFixed(3).padStart(6, "0")}`;
+};
+
+// sector times render as bare seconds ("28.104") per the detail-card spec;
+// ≥60s falls back to fmtLapTime so pathological values don't print "3600.000".
+export const fmtSectorTime = (secs: number | null | undefined): string => {
+  if (secs == null || !isFinite(secs)) return "—";
+  if (secs < 60) return secs.toFixed(3);
+  return fmtLapTime(secs);
+};
+
+// --- #14 detail card: pure field resolver (React-free, tested) ---
+// "ready" covers loaded-empty AND failed — both render "—", never a
+// fabricated 0/"none"; only "pending" renders a skeleton.
+export type DetailPhase = "pending" | "ready";
+
+export interface StrategyDetail {
+  place: string;
+  grid: { pending: boolean; text: string };
+  finish: string;
+  fastestLap: { pending: boolean; text: string };
+  bestSector: { pending: boolean; text: string };
+  stops: string;
+  avgStop: { pending: boolean; text: string };
+  overtakes: { pending: boolean; text: string };
+}
+
+export const detailFields = (
+  s: DriverStrategy,
+  phases: { laps: DetailPhase; pit: DetailPhase; overtakes: DetailPhase; grid: DetailPhase },
+): StrategyDetail => {
+  const f = (phase: DetailPhase, text: () => string) =>
+    phase === "pending" ? { pending: true, text: "" } : { pending: false, text: text() };
+  return {
+    place: `P${s.finishPosition ?? "—"}${s.points != null ? ` · +${s.points} pts` : ""}`,
+    grid: f(phases.grid, () => `Grid ${s.gridPosition != null ? `P${s.gridPosition}` : "—"}`),
+    finish: `Finish P${s.finishPosition ?? "—"}`,
+    fastestLap: f(phases.laps, () => `Fastest lap ${fmtLapTime(s.fastestLap)}`),
+    bestSector: f(phases.laps, () =>
+      s.bestSector ? `Best S${s.bestSector.sector} ${fmtSectorTime(s.bestSector.value)}` : "Best —",
+    ),
+    stops: `Pit stops ${s.totalStops}`,
+    avgStop: f(phases.pit, () => `(avg ${s.avgStopTime != null ? `${s.avgStopTime.toFixed(2)}s` : "—"})`),
+    overtakes: f(phases.overtakes, () =>
+      s.overtakesMade + s.overtakesLost > 0
+        ? `Overtakes +${s.overtakesMade}/-${s.overtakesLost}`
+        : "Overtakes —",
+    ),
+  };
 };
 
 // --- interval parsing (single tested boundary for GapsTab) ---

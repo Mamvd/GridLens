@@ -7,12 +7,12 @@ import {
 import {
   computeStrategies, driverLapsForSectors, fmtLapTime,
   nameOfDriver, raceIsUnrun, parseInterval, fmtInterval,
-  loadRaceBase, loadLaps, loadIntervals, loadStints, loadPit, loadOvertakes,
-  missingResources, TAB_RESOURCES,
-  type RaceBundle, type RaceResKey,
+  loadRaceBase, loadLaps, loadIntervals, loadStints, loadPit, loadOvertakes, loadGrid,
+  missingResources, TAB_RESOURCES, DETAIL_RESOURCES, detailFields,
+  type RaceBundle, type RaceResKey, type DetailPhase,
 } from "../data/race";
 import type {
-  Meeting, Driver, Lap, Interval, Stint, PitEvent, SessionResult, Overtake,
+  Meeting, Driver, Lap, Interval, Stint, PitEvent, SessionResult, Overtake, StartingGrid,
 } from "../api/openf1";
 import { seasonRaceSessions } from "../data/season";
 import { formatRaceDateRange } from "../lib/dates";
@@ -45,6 +45,7 @@ const emptyRes = (): ResState => ({
   stints: { loading: false },
   pit: { loading: false },
   overtakes: { loading: false },
+  grid: { loading: false },
 });
 
 const LoadSkeleton = ({ chartHeight }: { chartHeight: number }) => (
@@ -68,6 +69,7 @@ const RES_LABEL: Partial<Record<RaceResKey, string>> = {
   stints: "tyre stints",
   pit: "pit stops",
   overtakes: "overtakes",
+  grid: "starting grid",
 };
 
 // per-tab gate: ONLY this tab's resources decide loading/error — a failed
@@ -176,6 +178,7 @@ export const Race = ({ meeting }: Props) => {
       key === "intervals" ? loadIntervals(sk, meeting.year) :
       key === "stints" ? loadStints(sk, meeting.year) :
       key === "pit" ? loadPit(sk, meeting.year) :
+      key === "grid" ? loadGrid(sk, meeting.year) :
       loadOvertakes(sk, meeting.year);
     loader.then(
       (v) => {
@@ -250,9 +253,7 @@ export const Race = ({ meeting }: Props) => {
       stints: (res.stints.data as Stint[] | undefined) ?? [],
       pitEvents: (res.pit.data as PitEvent[] | undefined) ?? [],
       overtakes: (res.overtakes.data as Overtake[] | undefined) ?? [],
-      // ponytail: starting_grid only rides the full loadRaceBundle path —
-      // gridPosition feeds no view, so per-tab bundles carry an empty grid.
-      grid: [],
+      grid: (res.grid.data as StartingGrid[] | undefined) ?? [],
       numberToDriver: new Map(drivers.map((d) => [d.driver_number, d])),
       stale: sessionsStale || Object.values(res).some((s) => s.stale === true),
     };
@@ -263,6 +264,14 @@ export const Race = ({ meeting }: Props) => {
   const retryKeys = (keys: RaceResKey[]) => {
     if (!sess) return;
     for (const k of keys) startLoad(genRef.current, sess.sk, k);
+  };
+
+  // detail card on expand: ask for every detail resource — startLoad skips
+  // loaded + in-flight keys, so repeat expands cost 0 requests
+  const ensureDetail = () => {
+    if (!sess) return;
+    const gen = genRef.current;
+    for (const key of DETAIL_RESOURCES) startLoad(gen, sess.sk, key);
   };
 
   // render guard mirrors the effect guard above — no bundle fetch ever fires
@@ -371,7 +380,7 @@ export const Race = ({ meeting }: Props) => {
             tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}
             rowCount={strategies.length} emptyMessage="No strategy data available for this race."
           >
-            <StrategyTab strategies={strategies} />
+            <StrategyTab strategies={strategies} res={res} onExpand={ensureDetail} />
           </TabGate>
         </TabsContent>
         <TabsContent value="pit">
@@ -614,7 +623,28 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
 
 // ---- Strategy: compound sequence + stops per driver ----
 // empty (0 strategies) never reaches here: TabGate renders the empty message.
-const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => {
+// Row = <button> (Tab/Enter/Space expand). Detail loads laps/pit/overtakes/grid
+// on demand via onExpand → startLoad (cache-deduped, gen-guarded).
+const StrategyTab = ({ strategies, res, onExpand }: {
+  strategies: ReturnType<typeof computeStrategies>;
+  res: ResState;
+  onExpand: () => void;
+}) => {
+  const [openDriver, setOpenDriver] = useState<number | null>(null);
+  const phase = (k: RaceResKey): DetailPhase => {
+    const s = res[k];
+    if (s.data !== undefined) return "ready";
+    // ponytail: detail-load failure folds into "ready" → field shows "—";
+    // upgrade path: per-field retry once error states get a UI here.
+    if (s.error) return "ready";
+    return "pending";
+  };
+  const detailPhases = {
+    laps: phase("laps"), pit: phase("pit"),
+    overtakes: phase("overtakes"), grid: phase("grid"),
+  };
+  const anyPending = Object.values(detailPhases).some((p) => p === "pending");
+
   return (
     <Card className="w-full">
       <CardHeader className="mb-4">
@@ -622,41 +652,74 @@ const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStra
       </CardHeader>
       <CardContent>
         <div className="space-y-2">
-          {strategies.map((s) => (
-            <div key={s.driver.driver_number} className="flex flex-col gap-1.5 border-b border-muted/50 px-3 py-3 last:border-b-0 sm:flex-row sm:items-center sm:gap-4 sm:py-2">
-              {/* narrow: pos+name on line 1; ≥sm: contents → flat single row */}
-              <div className="flex items-center gap-4 sm:contents">
-                <span className="min-w-[40px] text-muted-foreground text-sm">{s.finishPosition ?? "—"}</span>
-                <span className="flex-1 text-muted-foreground text-sm">{nameOfDriver(s.driver)}</span>
+          {strategies.map((s) => {
+            const isOpen = openDriver === s.driver.driver_number;
+            const d = detailFields(s, detailPhases);
+            const fld = (f: { pending: boolean; text: string }) =>
+              f.pending
+                ? <Skeleton className="inline-block h-3.5 w-14 align-middle" aria-hidden="true" />
+                : f.text;
+            return (
+              <div key={s.driver.driver_number} className="border-b border-muted/50 last:border-b-0">
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  onClick={() => {
+                    if (isOpen) { setOpenDriver(null); return; }
+                    setOpenDriver(s.driver.driver_number);
+                    onExpand();
+                  }}
+                  className="flex w-full flex-col gap-1.5 px-3 py-3 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:flex-row sm:items-center sm:gap-4 sm:py-2"
+                >
+                  {/* narrow: pos+name on line 1; ≥sm: contents → flat single row */}
+                  <div className="flex items-center gap-4 sm:contents">
+                    <span className="min-w-[40px] text-muted-foreground text-sm">{s.finishPosition ?? "—"}</span>
+                    <span className="flex-1 text-muted-foreground text-sm">{nameOfDriver(s.driver)}</span>
+                  </div>
+                  {/* always wrappable: a 5-stint chain never forces page scroll;
+                      arrow rides with the chip it introduces (no orphan/trailing →) */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {s.compounds.map((c, i) => {
+                      const bgColor = c === "SOFT" ? "var(--chart-1)" : c === "MEDIUM" ? "var(--chart-2)" : c === "HARD" ? "var(--chart-3)" : "var(--muted)";
+                      const textColor = c === "MEDIUM" ? "var(--foreground)" : "var(--card-foreground)";
+                      return (
+                        <span key={i} className="inline-flex items-center gap-1.5 text-xs">
+                          {i > 0 && <span aria-hidden="true" className="text-muted-foreground">→</span>}
+                          <span
+                            className="px-2 py-0.5 rounded font-medium"
+                            style={{
+                              backgroundColor: bgColor,
+                              color: textColor,
+                            }}
+                            title={`${c} · ${s.stintLaps[i]} laps`}
+                          >
+                            {c} {s.stintLaps[i]}
+                          </span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <span className="min-w-[60px] text-muted-foreground text-sm">
+                    {s.totalStops} stop{s.totalStops === 1 ? "" : "s"}
+                  </span>
+                </button>
+                {isOpen && (
+                  <div className="space-y-1 border-t border-muted/40 bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+                    {anyPending && (
+                      <p className="flex items-center gap-2 text-xs">
+                        <Skeleton className="h-3 w-14" />
+                        loading details…
+                      </p>
+                    )}
+                    <p>{d.place}</p>
+                    <p>{fld(d.grid)} → {d.finish}</p>
+                    <p>{fld(d.fastestLap)} · {fld(d.bestSector)}</p>
+                    <p>{d.stops} {fld(d.avgStop)} · {fld(d.overtakes)}</p>
+                  </div>
+                )}
               </div>
-              {/* always wrappable: a 5-stint chain never forces page scroll;
-                  arrow rides with the chip it introduces (no orphan/trailing →) */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {s.compounds.map((c, i) => {
-                  const bgColor = c === "SOFT" ? "var(--chart-1)" : c === "MEDIUM" ? "var(--chart-2)" : c === "HARD" ? "var(--chart-3)" : "var(--muted)";
-                  const textColor = c === "MEDIUM" ? "var(--foreground)" : "var(--card-foreground)";
-                  return (
-                    <span key={i} className="inline-flex items-center gap-1.5 text-xs">
-                      {i > 0 && <span aria-hidden="true" className="text-muted-foreground">→</span>}
-                      <span
-                        className="px-2 py-0.5 rounded font-medium"
-                        style={{
-                          backgroundColor: bgColor,
-                          color: textColor,
-                        }}
-                        title={`${c} · ${s.stintLaps[i]} laps`}
-                      >
-                        {c} {s.stintLaps[i]}
-                      </span>
-                    </span>
-                  );
-                })}
-              </div>
-              <span className="min-w-[60px] text-muted-foreground text-sm">
-                {s.totalStops} stop{s.totalStops === 1 ? "" : "s"}
-              </span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </CardContent>
     </Card>

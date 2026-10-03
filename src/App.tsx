@@ -5,7 +5,7 @@ import {
 } from "react-router-dom";
 import { seasonMeetings } from "./data/season";
 import {
-  resolveMeetingsState, initialMeetingsState,
+  resolveMeetingsState, initialMeetingsState, isRestrictedOpenF1Error,
   type MeetingsLoadState,
 } from "./lib/meetings-state";
 import { Season } from "./views/Season";
@@ -45,11 +45,15 @@ const NotFound = () => (
 
 // #9: meetings fetch failed with no cached entry — never "No races found".
 // Raw error text stays out of the copy (title attr only).
-const MeetingsErrorCard = ({ year, onRetry }: { year: number; onRetry: () => void }) => (
+// restricted: API is reachable but 401-locked during a live F1 session —
+// different truth than "unable to reach", so different copy.
+const MeetingsErrorCard = ({ year, restricted, onRetry }: { year: number; restricted?: boolean; onRetry: () => void }) => (
   <Card className="border-destructive/50 bg-destructive/10">
     <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
       <p className="text-[13px] text-destructive">
-        Unable to reach OpenF1. The {year} season could not be loaded.
+        {restricted
+          ? "OpenF1 is temporarily restricting free access while a live F1 session is in progress — data for all seasons is unavailable until it ends."
+          : <>Unable to reach OpenF1. The {year} season could not be loaded.</>}
       </p>
       <Button variant="outline" size="sm" onClick={onRetry}>Retry</Button>
     </CardContent>
@@ -72,7 +76,7 @@ const SeasonRoute = ({ state, onRetry }: { state: MeetingsLoadState; onRetry: ()
     return <Navigate to={`/season/${DEFAULT_YEAR}`} replace />;
   }
   // error + no stale cache → explicit error card (never "No races found")
-  if (state.status === "error") return <MeetingsErrorCard year={Number(year)} onRetry={onRetry} />;
+  if (state.status === "error") return <MeetingsErrorCard year={Number(year)} restricted={state.restricted} onRetry={onRetry} />;
   // success with 0 meetings is the ONLY empty case → Season shows "No races found"
   if (state.status !== "success") return <RouteSkeleton />;
   return (
@@ -98,7 +102,7 @@ const RaceRoute = ({ state, onRetry }: { state: MeetingsLoadState; onRetry: () =
     return <Navigate to={`/race/${year}/${slug}/pace`} replace />;
   }
   // meetings error → same card as Season route, not skeleton-forever / NotFound
-  if (state.status === "error") return <MeetingsErrorCard year={Number(year)} onRetry={onRetry} />;
+  if (state.status === "error") return <MeetingsErrorCard year={Number(year)} restricted={state.restricted} onRetry={onRetry} />;
   const meetings = state.status === "success" ? state.meetings : [];
   const loadedYear = state.status === "success" ? state.year : null;
   const meeting = meetingFor(meetings, slug ?? "");
@@ -139,7 +143,11 @@ const Shell = () => {
         .catch((e) => {
           if ((e as Error)?.name === "AbortError") return;
           if (!alive) return;
-          setState((prev) => resolveMeetingsState(prev, { type: "error", year }));
+          setState((prev) => resolveMeetingsState(prev, {
+            type: "error",
+            year,
+            restricted: isRestrictedOpenF1Error(e),
+          }));
         });
     }
     return () => { alive = false; controller.abort(); };

@@ -16,8 +16,9 @@ execSync(
 const require = createRequire(import.meta.url);
 const modPath = ["/tmp/meetingscheck/lib/meetings-state.js", "/tmp/meetingscheck/meetings-state.js"].find(existsSync);
 if (!modPath) throw new Error("compiled meetings-state.js not found under /tmp/meetingscheck");
-const { resolveMeetingsState, initialMeetingsState } = require(modPath);
+const { resolveMeetingsState, initialMeetingsState, isRestrictedOpenF1Error } = require(modPath);
 assert.equal(typeof resolveMeetingsState, "function", "resolveMeetingsState export missing");
+assert.equal(typeof isRestrictedOpenF1Error, "function", "isRestrictedOpenF1Error export missing");
 
 let failed = 0;
 const check = (name, fn) => {
@@ -78,6 +79,34 @@ check("6. start on year change → loading regardless of prior state", () => {
   const prev = { status: "success", year: 2025, meetings: [m], stale: false };
   const s = resolveMeetingsState(prev, { type: "start", year: 2026 });
   assert.equal(s.status, "loading");
+});
+
+check("7. classifier: live-session 401 message → true; AbortError / generic fetch → false", () => {
+  const restricted = new Error(
+    'OpenF1 401 on meetings: {"detail":"Live F1 session in progress. Global API access (including past sessions) is restricted to authenticated users until the session ends."}',
+  );
+  assert.equal(isRestrictedOpenF1Error(restricted), true, "401 body phrase must match");
+  assert.equal(isRestrictedOpenF1Error(new DOMException("Aborted", "AbortError")), false, "AbortError never restricted");
+  assert.equal(isRestrictedOpenF1Error(new Error("Failed to fetch")), false, "opaque network failure not restricted");
+  assert.equal(isRestrictedOpenF1Error(new Error("OpenF1 429 on meetings: rate-limited")), false, "429 not restricted");
+  assert.equal(isRestrictedOpenF1Error(undefined), false, "nullish input safe");
+});
+
+check("8. restricted flag preserved on error event; reset by start/success", () => {
+  const err = resolveMeetingsState(loading, { type: "error", year: 2026, restricted: true });
+  assert.equal(err.status, "error");
+  assert.equal(err.restricted, true, "restricted passes through to state");
+  const plain = resolveMeetingsState(loading, { type: "error", year: 2026, restricted: false });
+  assert.equal(plain.restricted, false, "false preserved (not dropped)");
+  // start/success carry no restricted → stale lockout flag never leaks forward
+  const started = resolveMeetingsState(err, { type: "start", year: 2026 });
+  assert.equal(started.status, "loading");
+  assert.equal(started.restricted, undefined, "start resets restricted");
+  const ok = resolveMeetingsState(err, { type: "success", year: 2026, meetings: [m] });
+  assert.equal(ok.status, "success");
+  assert.equal(ok.restricted, undefined, "success resets restricted");
+  const staleOk = resolveMeetingsState(err, { type: "staleFallback", year: 2026, meetings: [m] });
+  assert.equal(staleOk.restricted, undefined, "staleFallback resets restricted");
 });
 
 if (failed) {

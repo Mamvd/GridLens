@@ -15,6 +15,7 @@ import type {
   Meeting, Driver, Lap, Interval, Stint, PitEvent, SessionResult, Overtake,
 } from "../api/openf1";
 import { seasonRaceSessions } from "../data/season";
+import { formatRaceDateRange } from "../lib/dates";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -103,7 +104,7 @@ export const Race = ({ meeting }: Props) => {
   const { year = "", slug = "", tab: tabParam = "pace" } = useParams();
   const tab = tabParam as Tab; // App RaceRoute validated it ∈ TABS
   const [res, setRes] = useState<ResState>(emptyRes);
-  const [sess, setSess] = useState<{ sk: number; meetingKey: number } | null>(null);
+  const [sess, setSess] = useState<{ sk: number; meetingKey: number; gmtOffset?: string } | null>(null);
   const [error, setError] = useState("");
   const [sessionsStale, setSessionsStale] = useState(false);
   const [refDriver, setRefDriver] = useState<number | null>(null);
@@ -197,7 +198,7 @@ export const Race = ({ meeting }: Props) => {
         if (!alive || gen !== genRef.current) return;
         const race = sessionsRes.data.find((s) => s.meeting_key === meeting.meeting_key);
         if (!race) { setError("No race session found for this meeting."); return; }
-        setSess({ sk: race.session_key, meetingKey: meeting.meeting_key });
+        setSess({ sk: race.session_key, meetingKey: meeting.meeting_key, gmtOffset: race.gmt_offset });
         setSessionsStale(sessionsRes.stale);
         startLoad(gen, race.session_key, "base");
       })
@@ -309,7 +310,9 @@ export const Race = ({ meeting }: Props) => {
           <div className="space-y-1">
             <Button variant="outline" onClick={() => navigate(`/season/${meeting.year}`)}>← Season</Button>
             <h1 className="text-[17px] font-semibold tracking-tight">{meeting.meeting_name}</h1>
-            <div className="text-muted-foreground text-sm">{meeting.circuit_short_name} · {meeting.date_start}</div>
+            <div className="text-muted-foreground text-sm">
+              {meeting.circuit_short_name} · {formatRaceDateRange(meeting.date_start, meeting.date_end, meeting.gmt_offset ?? sess?.gmtOffset)}
+            </div>
           </div>
         </div>
       </Card>

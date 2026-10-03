@@ -104,8 +104,12 @@ export interface Meeting {
   country_code: string;
   country_flag: string;
   year: number;
+  // date_start/date_end are UTC ISO 8601; gmt_offset ("HH:MM:SS") is venue
+  // local time minus GMT. Docs-verified — live verification pending (free
+  // tier currently 401-locks every endpoint during live sessions).
   date_start: string;
   date_end: string;
+  gmt_offset?: string;
   circuit_key: number;
   circuit_short_name: string;
   circuit_image: string;
@@ -116,6 +120,7 @@ export interface Session {
   meeting_key: number;
   session_name: string; // "Practice 1" | "Qualifying" | "Race"
   session_date: string;
+  gmt_offset?: string; // venue local offset, same semantics as Meeting — docs-verified, live pending (lockout)
 }
 
 export interface Driver {

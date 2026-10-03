@@ -19,6 +19,9 @@ export interface CachePolicy {
 }
 
 // Caller-side classification — no hardcoded years in the policy itself.
+// Invariant: App's year selector is [2026,2025,2024,2023] capped by
+// new Date().getFullYear(), so future seasons are unreachable — the
+// "future-year" status state cannot occur from the UI.
 export const classifySeason = (year: number, live = false): CacheStatus =>
   live ? "live" : year >= new Date().getFullYear() ? "in-progress" : "completed";
 

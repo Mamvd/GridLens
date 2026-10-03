@@ -8,7 +8,10 @@ export type Ops = Record<string, string | number | boolean | (string | number | 
 
 // --- global concurrency limiter + 429 backoff ---
 // OpenF1 rate-limits aggressively (~429) when a season load fans out to ~96
-// parallel requests. Cap in-flight requests and back off on 429.
+// parallel requests. Intent: ~2 request-starts/s (pLimit(4) + MIN_SPACING_MS
+// 500ms) — do NOT raise concurrency: 429 responses carry no CORS headers, so
+// the browser reports them as opaque "Failed to fetch" with no status to
+// retry on. Backoff absorbs stragglers; the spacing gate prevents the burst.
 // ponytail: tiny p-limit clone — cap concurrent in-flight requests at 4.
 // Add jittered throttling (not just backoff) only if 429s persist at this cap.
 const pLimit = (concurrency: number) => {

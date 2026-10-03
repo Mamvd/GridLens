@@ -19,13 +19,15 @@ export const chartTooltip = {
 type Props = {
   title: string
   subtitle?: string
+  /** one-sentence screen-reader description of what the chart shows */
+  srSummary?: string
   height?: number
   className?: string
   action?: React.ReactNode
   children: React.ReactElement
 }
 
-export function ChartCard({ title, subtitle, height = 320, className, action, children }: Props) {
+export function ChartCard({ title, subtitle, srSummary, height = 320, className, action, children }: Props) {
   return (
     <Card className={cn(className)}>
       <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
@@ -36,6 +38,7 @@ export function ChartCard({ title, subtitle, height = 320, className, action, ch
         {action}
       </CardHeader>
       <CardContent>
+        {srSummary ? <p className="sr-only">{srSummary}</p> : null}
         <div style={{ width: "100%", height }}>
           <ResponsiveContainer width="100%" height="100%">{children}</ResponsiveContainer>
         </div>

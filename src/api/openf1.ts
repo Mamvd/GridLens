@@ -45,6 +45,71 @@ const spacingGate = async (signal?: AbortSignal) => {
 
 const abortErr = () => new DOMException("Aborted", "AbortError");
 
+// --- runtime validation at the API boundary ---
+// OpenF1 occasionally returns HTML error pages / wrong shapes; views crash on
+// missing identity keys and NaN. Keep this small: identity + a few required
+// fields that crash views today. Message is safe for title attrs / String(e).
+// ponytail: not a schema engine — add fields to IDENTITY/REQUIRED only when a
+// missing key actually breaks a view.
+export class OpenF1ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenF1ValidationError";
+  }
+}
+
+const IDENTITY: Record<string, string> = {
+  meetings: "meeting_key",
+  sessions: "session_key",
+  drivers: "driver_number",
+  laps: "driver_number",
+  intervals: "driver_number",
+  stints: "driver_number",
+  pit: "driver_number",
+  // overtakes rows carry overtaking_/overtaken_driver_number only — verified live
+  overtakes: "overtaking_driver_number",
+  starting_grid: "driver_number",
+  positions: "driver_number",
+  session_result: "driver_number",
+};
+
+// fields that crash views when the key is absent (value may still be null)
+const REQUIRED: Record<string, string[]> = {
+  session_result: ["position", "driver_number"],
+  drivers: ["driver_number", "first_name", "last_name"],
+  intervals: ["driver_number", "interval"],
+};
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+export const validateRows = <T>(resource: string, rows: unknown): T[] => {
+  if (!Array.isArray(rows)) {
+    throw new OpenF1ValidationError(`OpenF1 invalid response on ${resource}: expected an array`);
+  }
+  const idKey = IDENTITY[resource];
+  const required = idKey ? [idKey, ...(REQUIRED[resource] ?? [])] : (REQUIRED[resource] ?? []);
+  const out: T[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!isPlainObject(row)) {
+      throw new OpenF1ValidationError(`OpenF1 invalid row ${i} on ${resource}: expected an object`);
+    }
+    for (const k of required) {
+      if (!(k in row) || row[k] === undefined) {
+        throw new OpenF1ValidationError(`OpenF1 invalid row ${i} on ${resource}: missing ${k}`);
+      }
+    }
+    for (const v of Object.values(row)) {
+      if (typeof v === "number" ? Number.isNaN(v) : v === "NaN") {
+        throw new OpenF1ValidationError(`OpenF1 invalid row ${i} on ${resource}: NaN field`);
+      }
+    }
+    out.push(row as T);
+  }
+  return out;
+};
+
 // delay that rejects immediately when signal aborts (fast cancel of spacing/backoff waits).
 const delay = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -89,8 +154,15 @@ export const getOpenF1 = async <T>(resource: string, ops: Ops = {}, opts?: { sig
     const body = await res.text();
     throw new Error(`OpenF1 ${res.status} on ${resource}: ${body.slice(0, 200)}`);
   }
-  const data = await res.json();
-  return Array.isArray(data) ? data : [data];
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    // HTML/garbage body → typed error, not a raw SyntaxError in a title attr
+    throw new OpenF1ValidationError(`OpenF1 malformed JSON on ${resource}`);
+  }
+  // non-array single object is wrapped; anything else fails validation
+  return validateRows<T>(resource, Array.isArray(data) ? data : [data]);
 };
 
 // --- shared types (only fields we use) ---
@@ -119,7 +191,9 @@ export interface Session {
   session_key: number;
   meeting_key: number;
   session_name: string; // "Practice 1" | "Qualifying" | "Race"
-  session_date: string;
+  // API returns date_start/date_end (UTC ISO), no session_date field — verified live 2026-10
+  date_start: string;
+  date_end: string;
   gmt_offset?: string; // venue local offset, same semantics as Meeting — docs-verified, live pending (lockout)
 }
 
@@ -206,11 +280,11 @@ export interface SessionResult {
 
 export interface Overtake {
   session_key: number;
-  driver_number: number;
+  meeting_key: number;
+  date: string;
   overtaking_driver_number: number | null;
   overtaken_driver_number: number | null;
   position: number | null;
-  overtake_lap: number | null;
 }
 
 export interface StartingGrid {

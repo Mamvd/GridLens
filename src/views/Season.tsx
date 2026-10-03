@@ -283,7 +283,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
         </div>
       )}
       <section>
-        <h3 className={SECTION}>Calendar</h3>
+        <h2 className={SECTION}>Calendar</h2>
         <Card>
           <CardContent className="pt-6">
             {meetings.length === 0 ? (
@@ -325,7 +325,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
       </section>
 
       <section>
-        <h3 className={SECTION}>Championship</h3>
+        <h2 className={SECTION}>Championship</h2>
         <StageSlot
           status={coreStatus} error={coreError} stale={coreStale}
           message={`Failed to load the ${year} championship data.`}
@@ -397,6 +397,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
               <ChartCard
                 title="Drivers' championship"
                 subtitle={`Cumulative points · ${sel.visible.length} shown`}
+                srSummary="Line chart of cumulative championship points per driver across each Grand Prix; legend and table below show the same data."
               >
                 <LineChart data={standingsSeries.rows}>
                   <CartesianGrid {...GRID_PROPS} />
@@ -440,7 +441,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
       </section>
 
       <section>
-        <h3 className={SECTION}>Teams &amp; strategy</h3>
+        <h2 className={SECTION}>Teams &amp; strategy</h2>
         <div className="grid gap-6 lg:grid-cols-2">
           {/* core failed → its one error card already sits above; skip duplicates */}
           {coreStatus === "failed" ? null : (
@@ -450,7 +451,11 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
               onRetry={retryCore} skeleton={<ChartSkeleton />}
               rowCount={topTeams.length} emptyMessage="No team data yet."
             >
-              <ChartCard title="Constructors' championship" subtitle="Top 10 teams">
+              <ChartCard
+                title="Constructors' championship"
+                subtitle="Top 10 teams"
+                srSummary="Bar chart of total championship points for the top 10 constructor teams."
+              >
                 <BarChart data={topTeams}>
                   <CartesianGrid {...GRID_PROPS} />
                   <XAxis
@@ -475,7 +480,11 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
             onRetry={retryExtras} skeleton={<ChartSkeleton />}
             rowCount={topStrategies.length} emptyMessage="No strategy data yet."
           >
-            <ChartCard title="Most common strategies" subtitle="Compound sequences across the season">
+            <ChartCard
+              title="Most common strategies"
+              subtitle="Compound sequences across the season"
+              srSummary="Horizontal bar chart counting how many races each tyre compound sequence was used across the season."
+            >
               <BarChart data={topStrategies} layout="vertical">
                 <CartesianGrid {...GRID_PROPS} />
                 <XAxis type="number" {...AXIS} tick={TICK} allowDecimals={false} />
@@ -499,7 +508,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
       {/* core failed → its one error card already sits above; skip duplicates */}
       {coreStatus !== "failed" && (
         <section>
-          <h3 className={SECTION}>Drivers&apos; points</h3>
+          <h2 className={SECTION}>Drivers&apos; points</h2>
           <StageSlot
             status={coreStatus} error={coreError} stale={coreStale}
             message={`Failed to load the ${year} championship data.`}

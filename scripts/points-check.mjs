@@ -134,8 +134,8 @@ await scenario("c. unfinished sprint: session exists, zero result rows → no th
 await scenario("d. mid-season team swap: constructor credits per-session teams; display = final", async () => {
   FIXTURE = {
     sessions: [
-      { session_key: 4001, meeting_key: 401, session_name: "Race", year: 2094, session_date: "2094-03-01" },
-      { session_key: 4002, meeting_key: 402, session_name: "Race", year: 2094, session_date: "2094-04-05" },
+      { session_key: 4001, meeting_key: 401, session_name: "Race", year: 2094, date_start: "2094-03-01" },
+      { session_key: 4002, meeting_key: 402, session_name: "Race", year: 2094, date_start: "2094-04-05" },
     ],
     session_result: [
       ...rows(4001, 401, [[30, 3, 10]]), // early race on team A
@@ -161,8 +161,8 @@ await scenario("d. mid-season team swap: constructor credits per-session teams; 
 await scenario("e. sprint vs race team split: sprint pts → team A, race pts → team B", async () => {
   FIXTURE = {
     sessions: [
-      { session_key: 5001, meeting_key: 501, session_name: "Sprint", year: 2095, session_date: "2095-06-01" },
-      { session_key: 5002, meeting_key: 501, session_name: "Race", year: 2095, session_date: "2095-06-02" },
+      { session_key: 5001, meeting_key: 501, session_name: "Sprint", year: 2095, date_start: "2095-06-01" },
+      { session_key: 5002, meeting_key: 501, session_name: "Race", year: 2095, date_start: "2095-06-02" },
     ],
     session_result: [
       ...rows(5001, 501, [[22, 1, 8]]),  // sprint P1 on team A
@@ -188,8 +188,8 @@ await scenario("e. sprint vs race team split: sprint pts → team A, race pts �
 await scenario("f. one-off substitute: single race's points go to that one-off team", async () => {
   FIXTURE = {
     sessions: [
-      { session_key: 6001, meeting_key: 601, session_name: "Race", year: 2096, session_date: "2096-03-01" },
-      { session_key: 6002, meeting_key: 602, session_name: "Race", year: 2096, session_date: "2096-03-22" },
+      { session_key: 6001, meeting_key: 601, session_name: "Race", year: 2096, date_start: "2096-03-01" },
+      { session_key: 6002, meeting_key: 602, session_name: "Race", year: 2096, date_start: "2096-03-22" },
     ],
     session_result: [
       ...rows(6001, 601, [[4, 1, 25]]),

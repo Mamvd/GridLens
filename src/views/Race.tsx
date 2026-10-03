@@ -127,6 +127,10 @@ export const Race = ({ meeting }: Props) => {
   const [reloadKey, setReloadKey] = useState(0);
   // gen guards slice writes: a newer meeting/reload invalidates older responses
   const genRef = useRef(0);
+  // Radix Tabs fires onValueChange twice per trigger interaction (both fires
+  // close over the pre-navigation render, so a URL-tab compare can't catch
+  // the second one) — a 100 ms window dedupes the pair into one history entry.
+  const lastTabNavRef = useRef<{ to: string; at: number }>({ to: "", at: 0 });
   const inflight = useRef<Set<string>>(new Set());
   const resRef = useRef(res);
 
@@ -330,7 +334,7 @@ export const Race = ({ meeting }: Props) => {
         <div className="flex flex-row items-start justify-between space-y-0 pb-4">
           <div className="space-y-1">
             <Button variant="outline" onClick={() => navigate(`/season/${meeting.year}`)}>← Season</Button>
-            <h1 className="text-[17px] font-semibold tracking-tight">{meeting.meeting_name}</h1>
+            <h2 className="text-[17px] font-semibold tracking-tight">{meeting.meeting_name}</h2>
             <div className="text-muted-foreground text-sm">
               {meeting.circuit_short_name} · {formatRaceDateRange(meeting.date_start, meeting.date_end, meeting.gmt_offset ?? sess?.gmtOffset)}
             </div>
@@ -338,7 +342,14 @@ export const Race = ({ meeting }: Props) => {
         </div>
       </Card>
 
-      <Tabs value={tab} onValueChange={(val) => navigate(`/race/${year}/${slug}/${val}`)} className="w-full">
+      <Tabs value={tab} onValueChange={(val) => {
+        const to = `/race/${year}/${slug}/${val}`;
+        // two-fire dedupe: same target within 100 ms = the second Radix fire
+        const now = Date.now();
+        if (lastTabNavRef.current.to === to && now - lastTabNavRef.current.at < 100) return;
+        lastTabNavRef.current = { to, at: now };
+        navigate(to);
+      }} className="w-full">
         <TabsList className="grid w-full grid-cols-4 bg-muted">
           {TABS.map((t) => (
             <TabsTrigger key={t.id} value={t.id} className="flex-1 items-center justify-center px-2 h-10">
@@ -435,7 +446,11 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
           </div>
         )}
       </div>
-      <ChartCard title="Sector Times" height={chartHeight}>
+      <ChartCard
+        title="Sector Times"
+        height={chartHeight}
+        srSummary="Area chart of total lap time with line series for sector 1, sector 2 and sector 3 times on each lap."
+      >
         <ComposedChart data={laps}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="lap_number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
@@ -588,7 +603,11 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
         </div>
       )}
       <p className="muted small">Gap to the car ahead (intervals). Negative = behind / being lapped.</p>
-      <ChartCard title="Gap to Car Ahead" height={chartHeight}>
+      <ChartCard
+        title="Gap to Car Ahead"
+        height={chartHeight}
+        srSummary="Line chart of the time gap to the car ahead on each lap, with an optional second line for a comparison driver."
+      >
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
           <XAxis dataKey="t" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" minTickGap={60} />
@@ -740,7 +759,11 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
     <Card className="w-full">
       <CardContent className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section>
-          <ChartCard title="Pit Stop Times (avg)" height={260}>
+          <ChartCard
+            title="Pit Stop Times (avg)"
+            height={260}
+            srSummary="Horizontal bar chart of each driver's average pit stop time in seconds."
+          >
             <BarChart data={pitRows.map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! }))} layout="vertical">
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
@@ -757,7 +780,11 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
           </ChartCard>
         </section>
         <section>
-          <ChartCard title="Overtakes Made" height={260}>
+          <ChartCard
+            title="Overtakes Made"
+            height={260}
+            srSummary="Bar chart comparing overtakes made and overtakes lost for each driver."
+          >
             <BarChart data={overtakeRows.map((s) => ({ name: nameOfDriver(s.driver), made: s.overtakesMade, lost: s.overtakesLost }))}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />

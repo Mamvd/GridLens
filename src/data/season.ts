@@ -147,7 +147,7 @@ export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<Se
   const perRace = races.map((s) => ({
     sk: s.session_key,
     meetingKey: s.meeting_key,
-    date: s.session_date ?? "",
+    date: s.date_start ?? "",
     results: resultsBySession.get(s.session_key) ?? [],
     drivers: driversBySession.get(s.session_key) ?? [],
   }));
@@ -157,7 +157,7 @@ export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<Se
   const perSprint = sprints.map((s) => ({
     sk: s.session_key,
     meetingKey: s.meeting_key,
-    date: s.session_date ?? "",
+    date: s.date_start ?? "",
     results: resultsBySession.get(s.session_key) ?? [],
     drivers: driversBySession.get(s.session_key) ?? [],
   }));

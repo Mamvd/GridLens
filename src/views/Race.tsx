@@ -536,7 +536,7 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
       {bundle.drivers.length === 0 ? (
         <p className="text-sm text-muted-foreground">No driver data yet.</p>
       ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
           <div className="space-y-1">
             <label className="text-muted-foreground text-sm">Driver</label>
             <Select
@@ -669,7 +669,7 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
 
   return (
     <Card className="w-full">
-      <CardContent className="grid grid-cols-2 gap-4">
+      <CardContent className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <section>
           <ChartCard title="Pit Stop Times (avg)" height={260}>
             <BarChart data={pitRows.map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! }))} layout="vertical">

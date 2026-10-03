@@ -209,9 +209,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
       for (const [name, pts] of perDriver) row[name] = pts;
       return row;
     });
-    // ponytail: cap at 20 lines ("All" ≈ one F1 grid) — Recharts renders 20
-    // fine unanimated; raise after profiling if backmarker data is wanted.
-    const names = [...perDriver.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([n]) => n);
+    const names = [...perDriver.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
     return { rows, names };
   }, [coreData]);
 
@@ -394,7 +392,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
             ) : (
               <ChartCard
                 title="Drivers' championship"
-                subtitle={`Cumulative points · ${sel.visible.length} shown`}
+                subtitle={`Cumulative points · ${sel.visible.length} shown · Sprint points merged into their weekend's column`}
                 srSummary="Line chart of cumulative championship points per driver across each Grand Prix; legend and table below show the same data."
               >
                 <LineChart data={standingsSeries.rows}>
@@ -528,7 +526,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Driver</TableHead>
-                      <TableHead>Team</TableHead>
+                      <TableHead>Final team</TableHead>
                       <TableHead className="text-right">Pts</TableHead>
                       <TableHead className="text-right">Wins</TableHead>
                       <TableHead className="text-right">Podiums</TableHead>

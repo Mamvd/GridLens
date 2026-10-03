@@ -623,29 +623,35 @@ const StrategyTab = ({ strategies }: { strategies: ReturnType<typeof computeStra
       <CardContent>
         <div className="space-y-2">
           {strategies.map((s) => (
-            <div key={s.driver.driver_number} className="flex items-center gap-4 px-3 py-2 border-b border-muted/50 last:border-b-0">
-              <span className="min-w-[40px] text-muted-foreground text-sm">{s.finishPosition ?? "—"}</span>
-              <span className="flex-1 text-muted-foreground text-sm">{nameOfDriver(s.driver)}</span>
-              <span className="flex-shrink-0 space-x-2">
+            <div key={s.driver.driver_number} className="flex flex-col gap-1.5 border-b border-muted/50 px-3 py-3 last:border-b-0 sm:flex-row sm:items-center sm:gap-4 sm:py-2">
+              {/* narrow: pos+name on line 1; ≥sm: contents → flat single row */}
+              <div className="flex items-center gap-4 sm:contents">
+                <span className="min-w-[40px] text-muted-foreground text-sm">{s.finishPosition ?? "—"}</span>
+                <span className="flex-1 text-muted-foreground text-sm">{nameOfDriver(s.driver)}</span>
+              </div>
+              {/* always wrappable: a 5-stint chain never forces page scroll;
+                  arrow rides with the chip it introduces (no orphan/trailing →) */}
+              <div className="flex flex-wrap items-center gap-1.5">
                 {s.compounds.map((c, i) => {
-                  const compoundName = c;
                   const bgColor = c === "SOFT" ? "var(--chart-1)" : c === "MEDIUM" ? "var(--chart-2)" : c === "HARD" ? "var(--chart-3)" : "var(--muted)";
                   const textColor = c === "MEDIUM" ? "var(--foreground)" : "var(--card-foreground)";
                   return (
-                    <span
-                      key={i}
-                      className="px-2 py-0.5 rounded text-xs font-medium"
-                      style={{
-                        backgroundColor: bgColor,
-                        color: textColor,
-                      }}
-                      title={`${compoundName} · ${s.stintLaps[i]} laps`}
-                    >
-                      {compoundName}
+                    <span key={i} className="inline-flex items-center gap-1.5 text-xs">
+                      {i > 0 && <span aria-hidden="true" className="text-muted-foreground">→</span>}
+                      <span
+                        className="px-2 py-0.5 rounded font-medium"
+                        style={{
+                          backgroundColor: bgColor,
+                          color: textColor,
+                        }}
+                        title={`${c} · ${s.stintLaps[i]} laps`}
+                      >
+                        {c} {s.stintLaps[i]}
+                      </span>
                     </span>
                   );
                 })}
-              </span>
+              </div>
               <span className="min-w-[60px] text-muted-foreground text-sm">
                 {s.totalStops} stop{s.totalStops === 1 ? "" : "s"}
               </span>

@@ -20,6 +20,9 @@ import {
 interface Props {
   year: number;
   meetings: Meeting[];
+  // #9: meetings list came from stale cache after an API failure — show the
+  // out-of-date note alongside seasonBundle's own stale flag.
+  meetingsStale?: boolean;
 }
 
 const SECTION = "mb-3 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground";
@@ -55,7 +58,7 @@ const ChartSkeleton = ({ className }: { className?: string }) => (
   </Card>
 );
 
-export const Season = ({ year, meetings }: Props) => {
+export const Season = ({ year, meetings, meetingsStale }: Props) => {
   const navigate = useNavigate();
   const [loaded, setLoaded] = useState<{ year: number; stats: SeasonStats; stale: boolean } | null>(null);
   const [error, setError] = useState("");
@@ -172,7 +175,7 @@ export const Season = ({ year, meetings }: Props) => {
 
   return (
     <div className="space-y-8">
-      {stale && (
+      {(stale || meetingsStale) && (
         <div className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
           Data may be out of date (latest revalidation failed).
         </div>

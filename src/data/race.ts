@@ -31,33 +31,73 @@ export interface RaceBundle {
 export const raceIsUnrun = (m: { date_start: string }, nowMs: number = Date.now()): boolean =>
   new Date(m.date_start).getTime() > nowMs;
 
+// ponytail: default in-progress when year omitted — short TTL is the safe
+// default for unknown recency. Upgrade path = pass the actual session
+// date_end from the session rows already in memory to detect live precisely.
+// live=true only takes effect when LIVE_DATA_ENABLED (free tier has no real-time).
+const racePolicy = (year?: number, live?: boolean) => {
+  const status = LIVE_DATA_ENABLED && live ? "live" : year == null ? "in-progress" : classifySeason(year);
+  return getCachePolicy(year ?? new Date().getFullYear(), status);
+};
+
+// one cached() call per resource — revisit-hits the two-tier cache (intervals
+// stays memory-only via the 500 KB localStorage gate in api/cache.ts)
+const raceRes = <T>(resource: string, sessionKey: number, year?: number, live?: boolean) =>
+  cached<T>(resource, { session_key: sessionKey },
+    () => getOpenF1<T>(resource, { session_key: sessionKey }), racePolicy(year, live));
+
+// always-needed resources (page shell: header, computeStrategies base)
+export const loadRaceBase = async (sessionKey: number, year?: number, live?: boolean) => {
+  const [resultsRes, driversRes] = await Promise.all([
+    raceRes<SessionResult>("session_result", sessionKey, year, live),
+    raceRes<Driver>("drivers", sessionKey, year, live),
+  ]);
+  return {
+    results: resultsRes.data,
+    drivers: driversRes.data,
+    stale: resultsRes.stale || driversRes.stale,
+  };
+};
+
+export const loadLaps = (sessionKey: number, year?: number, live?: boolean) =>
+  raceRes<Lap>("laps", sessionKey, year, live);
+export const loadIntervals = (sessionKey: number, year?: number, live?: boolean) =>
+  raceRes<Interval>("intervals", sessionKey, year, live);
+export const loadStints = (sessionKey: number, year?: number, live?: boolean) =>
+  raceRes<Stint>("stints", sessionKey, year, live);
+export const loadPit = (sessionKey: number, year?: number, live?: boolean) =>
+  raceRes<PitEvent>("pit", sessionKey, year, live);
+export const loadOvertakes = (sessionKey: number, year?: number, live?: boolean) =>
+  raceRes<Overtake>("overtakes", sessionKey, year, live);
+
+// --- tab → resource map (shared by Race.tsx and race-loading-check.mjs) ---
+// base (drivers + results) always loads immediately; these are the extras.
+export type TabName = "pace" | "gaps" | "strategy" | "pit";
+export type RaceResKey = "drivers" | "results" | "laps" | "intervals" | "stints" | "pit" | "overtakes";
+
+export const TAB_RESOURCES: Record<TabName, readonly RaceResKey[]> = {
+  pace: ["laps"],
+  gaps: ["intervals"],
+  strategy: ["stints"],
+  pit: ["stints", "pit", "overtakes"],
+};
+
+export const missingResources = (tab: TabName, has: (k: RaceResKey) => boolean): RaceResKey[] =>
+  (TAB_RESOURCES[tab] ?? []).filter((k) => !has(k));
+
 export const loadRaceBundle = async (
   sessionKey: number,
   year?: number,
   live?: boolean,
 ): Promise<RaceBundle> => {
-  // ponytail: default in-progress when year omitted — short TTL is the safe
-  // default for unknown recency. Upgrade path = pass the actual session
-  // date_end from the session rows already in memory to detect live precisely.
-  // live=true only takes effect when LIVE_DATA_ENABLED (free tier has no real-time).
-  const status = LIVE_DATA_ENABLED && live ? "live" : year == null ? "in-progress" : classifySeason(year);
-  const policy = getCachePolicy(year ?? new Date().getFullYear(), status);
-    const [driversRes, lapsRes, intervalsRes, stintsRes, pitRes, resultsRes, overtakesRes, grid] =
+  const [base, lapsRes, intervalsRes, stintsRes, pitRes, overtakesRes, grid] =
     await Promise.all([
-      cached<Driver>("drivers", { session_key: sessionKey }, () =>
-        getOpenF1<Driver>("drivers", { session_key: sessionKey }), policy),
-      cached<Lap>("laps", { session_key: sessionKey }, () =>
-        getOpenF1<Lap>("laps", { session_key: sessionKey }), policy),
-      cached<Interval>("intervals", { session_key: sessionKey }, () =>
-        getOpenF1<Interval>("intervals", { session_key: sessionKey }), policy),
-      cached<Stint>("stints", { session_key: sessionKey }, () =>
-        getOpenF1<Stint>("stints", { session_key: sessionKey }), policy),
-      cached<PitEvent>("pit", { session_key: sessionKey }, () =>
-        getOpenF1<PitEvent>("pit", { session_key: sessionKey }), policy),
-      cached<SessionResult>("session_result", { session_key: sessionKey }, () =>
-        getOpenF1<SessionResult>("session_result", { session_key: sessionKey }), policy),
-      cached<Overtake>("overtakes", { session_key: sessionKey }, () =>
-        getOpenF1<Overtake>("overtakes", { session_key: sessionKey }), policy),
+      loadRaceBase(sessionKey, year, live),
+      loadLaps(sessionKey, year, live),
+      loadIntervals(sessionKey, year, live),
+      loadStints(sessionKey, year, live),
+      loadPit(sessionKey, year, live),
+      loadOvertakes(sessionKey, year, live),
       (async () => {
         // starting_grid occasionally errors on older data — don't sink the bundle
         try {
@@ -68,21 +108,20 @@ export const loadRaceBundle = async (
       })(),
     ]);
 
-  const drivers = driversRes.data;
-  const numberToDriver = new Map(drivers.map((d) => [d.driver_number, d]));
+  const numberToDriver = new Map(base.drivers.map((d) => [d.driver_number, d]));
   return {
     sessionKey,
-    drivers: driversRes.data,
+    drivers: base.drivers,
+    results: base.results,
     laps: lapsRes.data,
     intervals: intervalsRes.data,
     stints: stintsRes.data,
     pitEvents: pitRes.data,
-    results: resultsRes.data,
     overtakes: overtakesRes.data,
     grid,
     numberToDriver,
-    stale: driversRes.stale || lapsRes.stale || intervalsRes.stale || stintsRes.stale
-      || pitRes.stale || resultsRes.stale || overtakesRes.stale,
+    stale: base.stale || lapsRes.stale || intervalsRes.stale || stintsRes.stale
+      || pitRes.stale || overtakesRes.stale,
   };
 };
 

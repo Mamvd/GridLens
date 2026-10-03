@@ -1,15 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend,
   BarChart, Bar, CartesianGrid, ComposedChart, Area,
 } from "recharts";
 import {
-  loadRaceBundle, computeStrategies, driverLapsForSectors, fmtLapTime,
+  computeStrategies, driverLapsForSectors, fmtLapTime,
   nameOfDriver, raceIsUnrun, parseInterval, fmtInterval,
-  type RaceBundle,
+  loadRaceBase, loadLaps, loadIntervals, loadStints, loadPit, loadOvertakes,
+  missingResources, TAB_RESOURCES,
+  type RaceBundle, type RaceResKey,
 } from "../data/race";
-import type { Meeting } from "../api/openf1";
+import type {
+  Meeting, Driver, Lap, Interval, Stint, PitEvent, SessionResult, Overtake,
+} from "../api/openf1";
 import { seasonRaceSessions } from "../data/season";
 
 import { Button } from "@/components/ui/button";
@@ -28,6 +32,67 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "pit", label: "Pit" },
 ];
 
+// per-resource slices — each tab's data loads, fails and retries on its own
+type Slice = { data?: unknown; loading: boolean; error?: string; stale?: boolean };
+type ResState = Record<RaceResKey, Slice>;
+const emptyRes = (): ResState => ({
+  drivers: { loading: false },
+  results: { loading: false },
+  laps: { loading: false },
+  intervals: { loading: false },
+  stints: { loading: false },
+  pit: { loading: false },
+  overtakes: { loading: false },
+});
+
+const LoadSkeleton = ({ chartHeight }: { chartHeight: number }) => (
+  <div className="space-y-6">
+    <Card>
+      <CardContent className="space-y-3 p-6">
+        <Skeleton className="h-4 w-48" />
+        <Skeleton className="h-3 w-64" />
+        <Skeleton className="h-9 w-full max-w-[360px]" />
+      </CardContent>
+    </Card>
+    <ChartCard title="Loading…" height={chartHeight}>
+      <div className="flex h-full items-center justify-center" />
+    </ChartCard>
+  </div>
+);
+
+const RES_LABEL: Partial<Record<RaceResKey, string>> = {
+  laps: "lap timing",
+  intervals: "gap intervals",
+  stints: "tyre stints",
+  pit: "pit stops",
+  overtakes: "overtakes",
+};
+
+// per-tab gate: ONLY this tab's resources decide loading/error — a failed
+// slice never blocks the other tabs.
+const TabGate = ({ tab, res, chartHeight, onRetry, children }: {
+  tab: Tab; res: ResState; chartHeight: number;
+  onRetry: (keys: RaceResKey[]) => void; children: ReactNode;
+}) => {
+  const needs = TAB_RESOURCES[tab];
+  const failed = needs.filter((k) => res[k].error);
+  if (failed.length > 0) {
+    return (
+      <Card className="border-destructive/50 bg-destructive/10">
+        <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+          <p className="text-[13px] text-destructive" title={failed.map((k) => String(res[k].error)).join("; ")}>
+            Failed to load {failed.map((k) => RES_LABEL[k] ?? k).join(", ")}.
+          </p>
+          <Button variant="outline" size="sm" onClick={() => onRetry(failed)}>Retry</Button>
+        </CardContent>
+      </Card>
+    );
+  }
+  if (needs.some((k) => res[k].loading || res[k].data === undefined)) {
+    return <LoadSkeleton chartHeight={chartHeight} />;
+  }
+  return <>{children}</>;
+};
 
 interface Props {
   meeting: Meeting;
@@ -35,13 +100,20 @@ interface Props {
 
 export const Race = ({ meeting }: Props) => {
   const navigate = useNavigate();
-  const { year = "", slug = "", tab = "pace" } = useParams();
-  const [bundle, setBundle] = useState<RaceBundle | null>(null);
+  const { year = "", slug = "", tab: tabParam = "pace" } = useParams();
+  const tab = tabParam as Tab; // App RaceRoute validated it ∈ TABS
+  const [res, setRes] = useState<ResState>(emptyRes);
+  const [sess, setSess] = useState<{ sk: number; meetingKey: number } | null>(null);
   const [error, setError] = useState("");
+  const [sessionsStale, setSessionsStale] = useState(false);
   const [refDriver, setRefDriver] = useState<number | null>(null);
   const [rivalDriver, setRivalDriver] = useState<number | null>(null);
   const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 0);
   const [reloadKey, setReloadKey] = useState(0);
+  // gen guards slice writes: a newer meeting/reload invalidates older responses
+  const genRef = useRef(0);
+  const inflight = useRef<Set<string>>(new Set());
+  const resRef = useRef(res);
 
   useEffect(() => {
     const handleResize = () => setWidth(window.innerWidth);
@@ -50,48 +122,135 @@ export const Race = ({ meeting }: Props) => {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // find the race session for this meeting
+  // keep the skip-if-loaded snapshot current (read by startLoad via ref)
+  useEffect(() => { resRef.current = res; }, [res]);
+
+  const startLoad = useCallback((gen: number, sk: number, key: RaceResKey | "base") => {
+    const patch = (k: RaceResKey, next: Partial<Slice>) =>
+      setRes((r) => ({ ...r, [k]: { ...r[k], ...next } }));
+    if (inflight.current.has(key)) return;
+    if (key !== "base" && resRef.current[key].data !== undefined) return; // loaded → revisit costs nothing
+    inflight.current.add(key);
+    const done = () => { if (gen === genRef.current) inflight.current.delete(key); };
+
+    if (key === "base") {
+      patch("drivers", { loading: true, error: undefined });
+      patch("results", { loading: true, error: undefined });
+      loadRaceBase(sk, meeting.year).then(
+        (b) => {
+          if (gen !== genRef.current) return;
+          patch("drivers", { data: b.drivers, loading: false, stale: b.stale });
+          patch("results", { data: b.results, loading: false, stale: b.stale });
+          const sorted = [...b.results].filter((r) => r.driver_number)
+            .sort((a, b2) => (a.position ?? Infinity) - (b2.position ?? Infinity));
+          if (sorted.length >= 2) {
+            setRefDriver(sorted[0].driver_number);
+            setRivalDriver(sorted[1].driver_number);
+          }
+        },
+        (e) => {
+          if (gen !== genRef.current || (e as Error)?.name === "AbortError") return;
+          patch("drivers", { loading: false, error: String(e) });
+          patch("results", { loading: false, error: String(e) });
+        },
+      ).finally(done);
+      return;
+    }
+
+    patch(key, { loading: true, error: undefined });
+    const loader =
+      key === "laps" ? loadLaps(sk, meeting.year) :
+      key === "intervals" ? loadIntervals(sk, meeting.year) :
+      key === "stints" ? loadStints(sk, meeting.year) :
+      key === "pit" ? loadPit(sk, meeting.year) :
+      loadOvertakes(sk, meeting.year);
+    loader.then(
+      (v) => {
+        if (gen !== genRef.current) return;
+        patch(key, { data: v.data, loading: false, stale: v.stale });
+      },
+      (e) => {
+        if (gen !== genRef.current || (e as Error)?.name === "AbortError") return;
+        patch(key, { loading: false, error: String(e) });
+      },
+    ).finally(done);
+  }, [meeting]);
+
+  // resolve the meeting's race session + always-on base; full reset on
+  // meeting change / reloadKey retry.
   useEffect(() => {
     // future race: single-key session_result 404s with no CORS headers (opaque
     // "Failed to fetch") — prevent the request, never catch it.
     if (raceIsUnrun(meeting)) return;
-    let alive = true;
-    const controller = new AbortController();
+    const gen = ++genRef.current;
+    inflight.current.clear();
+    setRes(emptyRes());
+    setSess(null);
     setError("");
-    setBundle(null);
+    setSessionsStale(false);
     setRefDriver(null);
     setRivalDriver(null);
+    let alive = true;
+    const controller = new AbortController();
     seasonRaceSessions(meeting.year)
       .then((sessionsRes) => {
-        if (!alive) return;
+        if (!alive || gen !== genRef.current) return;
         const race = sessionsRes.data.find((s) => s.meeting_key === meeting.meeting_key);
         if (!race) { setError("No race session found for this meeting."); return; }
-        loadRaceBundle(race.session_key, meeting.year)
-          .then((b) => {
-            if (!alive) return;
-            setBundle({ ...b, stale: b.stale || sessionsRes.stale });
-            const sorted = [...b.results].filter((r) => r.driver_number).sort((a, b2) => (a.position ?? Infinity) - (b2.position ?? Infinity));
-            if (sorted.length >= 2) {
-              setRefDriver(sorted[0].driver_number);
-              setRivalDriver(sorted[1].driver_number);
-            }
-          })
-          .catch((e) => {
-            if ((e as Error)?.name === "AbortError") return;
-            if (alive) setError(String(e));
-          });
+        setSess({ sk: race.session_key, meetingKey: meeting.meeting_key });
+        setSessionsStale(sessionsRes.stale);
+        startLoad(gen, race.session_key, "base");
       })
       .catch((e) => {
         if ((e as Error)?.name === "AbortError") return;
-        if (alive) setError(String(e));
+        if (alive && gen === genRef.current) setError(String(e));
       });
-    // ponytail: signal not threaded through seasonRaceSessions/loadRaceBundle
-    // (data layer frozen) — alive guard prevents stale meeting state; abort
+    // ponytail: signal not threaded through seasonRaceSessions/loadRaceBase
+    // (data layer frozen) — gen + alive guard stale meeting state; abort
     // activates once those accept opts.
     return () => { alive = false; controller.abort(); };
-  }, [meeting, reloadKey]);
+  }, [meeting, reloadKey, startLoad]);
+
+  // tab change (URL-driven): fetch this tab's resources minus already-loaded
+  // ones — never touches the base.
+  useEffect(() => {
+    if (raceIsUnrun(meeting) || !sess || sess.meetingKey !== meeting.meeting_key) return;
+    const gen = genRef.current;
+    for (const key of missingResources(tab, (k) => resRef.current[k].data !== undefined)) {
+      startLoad(gen, sess.sk, key);
+    }
+  }, [tab, sess, meeting, startLoad]);
+
+  const bundle = useMemo<RaceBundle | null>(() => {
+    if (!sess || sess.meetingKey !== meeting.meeting_key) return null;
+    const driversRaw = res.drivers.data;
+    const resultsRaw = res.results.data;
+    if (driversRaw === undefined || resultsRaw === undefined) return null;
+    const drivers = driversRaw as Driver[];
+    const results = resultsRaw as SessionResult[];
+    return {
+      sessionKey: sess.sk,
+      drivers,
+      results,
+      laps: (res.laps.data as Lap[] | undefined) ?? [],
+      intervals: (res.intervals.data as Interval[] | undefined) ?? [],
+      stints: (res.stints.data as Stint[] | undefined) ?? [],
+      pitEvents: (res.pit.data as PitEvent[] | undefined) ?? [],
+      overtakes: (res.overtakes.data as Overtake[] | undefined) ?? [],
+      // ponytail: starting_grid only rides the full loadRaceBundle path —
+      // gridPosition feeds no view, so per-tab bundles carry an empty grid.
+      grid: [],
+      numberToDriver: new Map(drivers.map((d) => [d.driver_number, d])),
+      stale: sessionsStale || Object.values(res).some((s) => s.stale === true),
+    };
+  }, [sess, meeting, res, sessionsStale]);
 
   const strategies = useMemo(() => (bundle ? computeStrategies(bundle) : []), [bundle]);
+
+  const retryKeys = (keys: RaceResKey[]) => {
+    if (!sess) return;
+    for (const k of keys) startLoad(genRef.current, sess.sk, k);
+  };
 
   // render guard mirrors the effect guard above — no bundle fetch ever fires
   if (raceIsUnrun(meeting)) {
@@ -113,15 +272,20 @@ export const Race = ({ meeting }: Props) => {
     );
   }
 
-  if (error) {
+  const baseError = res.drivers.error ?? res.results.error;
+  const fullError = error || (baseError ? String(baseError) : "");
+  if (fullError) {
     return (
       <Card className="border-destructive/50 bg-destructive/10">
         <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
-          <p className="text-[13px] text-destructive" title={error}>Failed to load {meeting.meeting_name}.</p>
+          <p className="text-[13px] text-destructive" title={fullError}>Failed to load {meeting.meeting_name}.</p>
           <Button
             variant="outline"
             size="sm"
-            onClick={() => { setError(""); setReloadKey((k) => k + 1); }}
+            onClick={() => {
+              if (error) { setError(""); setReloadKey((k) => k + 1); }
+              else if (sess) startLoad(genRef.current, sess.sk, "base");
+            }}
           >
             Retry
           </Button>
@@ -131,20 +295,7 @@ export const Race = ({ meeting }: Props) => {
   }
   const chartHeight = width < 768 ? 260 : 320;
 
-  if (!bundle) return (
-      <div className="space-y-6">
-        <Card>
-          <CardContent className="space-y-3 p-6">
-            <Skeleton className="h-4 w-48" />
-            <Skeleton className="h-3 w-64" />
-            <Skeleton className="h-9 w-full max-w-[360px]" />
-          </CardContent>
-        </Card>
-        <ChartCard title="Loading…" height={chartHeight}>
-          <div className="flex h-full items-center justify-center" />
-        </ChartCard>
-      </div>
-    );
+  if (!bundle) return <LoadSkeleton chartHeight={chartHeight} />;
 
   return (
     <div className="race">
@@ -172,29 +323,37 @@ export const Race = ({ meeting }: Props) => {
           ))}
         </TabsList>
         <TabsContent value="pace">
-          <PaceTab
-            bundle={bundle}
-            strategies={strategies}
-            refDriver={refDriver}
-            setRefDriver={setRefDriver}
-            chartHeight={chartHeight}
-          />
+          <TabGate tab="pace" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+            <PaceTab
+              bundle={bundle}
+              strategies={strategies}
+              refDriver={refDriver}
+              setRefDriver={setRefDriver}
+              chartHeight={chartHeight}
+            />
+          </TabGate>
         </TabsContent>
         <TabsContent value="gaps">
-          <GapsTab
-            bundle={bundle}
-            refDriver={refDriver}
-            rivalDriver={rivalDriver}
-            setRefDriver={setRefDriver}
-            setRivalDriver={setRivalDriver}
-            chartHeight={chartHeight}
-          />
+          <TabGate tab="gaps" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+            <GapsTab
+              bundle={bundle}
+              refDriver={refDriver}
+              rivalDriver={rivalDriver}
+              setRefDriver={setRefDriver}
+              setRivalDriver={setRivalDriver}
+              chartHeight={chartHeight}
+            />
+          </TabGate>
         </TabsContent>
         <TabsContent value="strategy">
-          <StrategyTab strategies={strategies} />
+          <TabGate tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+            <StrategyTab strategies={strategies} />
+          </TabGate>
         </TabsContent>
         <TabsContent value="pit">
-          <PitTab strategies={strategies} />
+          <TabGate tab="pit" res={res} chartHeight={chartHeight} onRetry={retryKeys}>
+            <PitTab strategies={strategies} />
+          </TabGate>
         </TabsContent>
       </Tabs>
     </div>

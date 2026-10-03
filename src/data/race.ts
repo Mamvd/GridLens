@@ -42,15 +42,16 @@ const racePolicy = (year?: number, live?: boolean) => {
 
 // one cached() call per resource — revisit-hits the two-tier cache (intervals
 // stays memory-only via the 500 KB localStorage gate in api/cache.ts)
-const raceRes = <T>(resource: string, sessionKey: number, year?: number, live?: boolean) =>
+const raceRes = <T>(resource: string, sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
   cached<T>(resource, { session_key: sessionKey },
-    () => getOpenF1<T>(resource, { session_key: sessionKey }), racePolicy(year, live));
+    (signal) => getOpenF1<T>(resource, { session_key: sessionKey }, { signal }),
+    racePolicy(year, live), opts);
 
 // always-needed resources (page shell: header, computeStrategies base)
-export const loadRaceBase = async (sessionKey: number, year?: number, live?: boolean) => {
+export const loadRaceBase = async (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) => {
   const [resultsRes, driversRes] = await Promise.all([
-    raceRes<SessionResult>("session_result", sessionKey, year, live),
-    raceRes<Driver>("drivers", sessionKey, year, live),
+    raceRes<SessionResult>("session_result", sessionKey, year, live, opts),
+    raceRes<Driver>("drivers", sessionKey, year, live, opts),
   ]);
   return {
     results: resultsRes.data,
@@ -59,18 +60,18 @@ export const loadRaceBase = async (sessionKey: number, year?: number, live?: boo
   };
 };
 
-export const loadLaps = (sessionKey: number, year?: number, live?: boolean) =>
-  raceRes<Lap>("laps", sessionKey, year, live);
-export const loadIntervals = (sessionKey: number, year?: number, live?: boolean) =>
-  raceRes<Interval>("intervals", sessionKey, year, live);
-export const loadStints = (sessionKey: number, year?: number, live?: boolean) =>
-  raceRes<Stint>("stints", sessionKey, year, live);
-export const loadPit = (sessionKey: number, year?: number, live?: boolean) =>
-  raceRes<PitEvent>("pit", sessionKey, year, live);
-export const loadOvertakes = (sessionKey: number, year?: number, live?: boolean) =>
-  raceRes<Overtake>("overtakes", sessionKey, year, live);
-export const loadGrid = (sessionKey: number, year?: number, live?: boolean) =>
-  raceRes<StartingGrid>("starting_grid", sessionKey, year, live);
+export const loadLaps = (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
+  raceRes<Lap>("laps", sessionKey, year, live, opts);
+export const loadIntervals = (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
+  raceRes<Interval>("intervals", sessionKey, year, live, opts);
+export const loadStints = (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
+  raceRes<Stint>("stints", sessionKey, year, live, opts);
+export const loadPit = (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
+  raceRes<PitEvent>("pit", sessionKey, year, live, opts);
+export const loadOvertakes = (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
+  raceRes<Overtake>("overtakes", sessionKey, year, live, opts);
+export const loadGrid = (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
+  raceRes<StartingGrid>("starting_grid", sessionKey, year, live, opts);
 
 // --- tab → resource map (shared by Race.tsx and race-loading-check.mjs) ---
 // base (drivers + results) always loads immediately; these are the extras.
@@ -97,19 +98,20 @@ export const loadRaceBundle = async (
   sessionKey: number,
   year?: number,
   live?: boolean,
+  opts?: { signal?: AbortSignal },
 ): Promise<RaceBundle> => {
   const [base, lapsRes, intervalsRes, stintsRes, pitRes, overtakesRes, grid] =
     await Promise.all([
-      loadRaceBase(sessionKey, year, live),
-      loadLaps(sessionKey, year, live),
-      loadIntervals(sessionKey, year, live),
-      loadStints(sessionKey, year, live),
-      loadPit(sessionKey, year, live),
-      loadOvertakes(sessionKey, year, live),
+      loadRaceBase(sessionKey, year, live, opts),
+      loadLaps(sessionKey, year, live, opts),
+      loadIntervals(sessionKey, year, live, opts),
+      loadStints(sessionKey, year, live, opts),
+      loadPit(sessionKey, year, live, opts),
+      loadOvertakes(sessionKey, year, live, opts),
       (async () => {
         // starting_grid occasionally errors on older data — don't sink the bundle
         try {
-          return await getOpenF1<StartingGrid>("starting_grid", { session_key: sessionKey });
+          return await getOpenF1<StartingGrid>("starting_grid", { session_key: sessionKey }, opts);
         } catch {
           return [] as StartingGrid[];
         }

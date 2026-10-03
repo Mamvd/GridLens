@@ -112,8 +112,9 @@ const getStaleEntry = <T>(resource: string, ops: Record<string, string | number 
 export const cached = async <T>(
   resource: string,
   ops: Record<string, string | number | boolean | any[]>,
-  fn: () => Promise<T[]>,
+  fn: (signal?: AbortSignal) => Promise<T[]>,
   policy: CachePolicy,
+  opts?: { signal?: AbortSignal },
 ): Promise<CachedResult<T>> => {
   const key = cacheKey(resource, ops);
   let staleEntry: T[] | undefined;
@@ -125,10 +126,27 @@ export const cached = async <T>(
     if (hit) return { data: hit, stale: false };
   }
   const pending = inflight.get(key) as Promise<CachedResult<T>> | undefined;
-  if (pending) return pending;
+  if (pending) {
+    const s = opts?.signal;
+    if (!s) return pending;
+    // ponytail: a signal-bearing caller joins the shared in-flight request —
+    // its own abort rejects ITS handle, the shared fetch keeps running. If the
+    // SHARED request is aborted (owner's signal fires first) and our signal
+    // is still live, re-issue once so the caller is not stranded; true
+    // network failures still propagate. Upgrade: refcounted per-signal
+    // abort so the fetch dies when its last caller drops.
+    if (s.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+    return pending.then((v) => {
+      if (s.aborted) throw new DOMException("Aborted", "AbortError");
+      return v;
+    }, (e: unknown) => {
+      if ((e as Error)?.name === "AbortError" && !s.aborted) return cached(resource, ops, fn, policy, opts);
+      throw e;
+    });
+  }
   const p = (async (): Promise<CachedResult<T>> => {
     try {
-      const data = await fn();
+      const data = await fn(opts?.signal);
       if (policy.persist) {
         const f = Date.now();
         mem.set(key, { d: data, f });

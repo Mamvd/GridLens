@@ -38,21 +38,23 @@ export interface RaceDriver {
 type ResultRow = SessionResult & { dnf?: boolean };
 
 // All GP meetings for a year (meetings?year=N works; exclude tests).
-export const seasonMeetings = (year: number) =>
-  cached<Meeting>("meetings", { year }, async () => {
-    const all = await getOpenF1<Meeting>("meetings", { year });
-    return all.filter((m) => m.meeting_name.includes("Grand Prix"));
-  }, seasonPolicy(year));
+export const seasonMeetings = (year: number, opts?: { signal?: AbortSignal }) =>
+  cached<Meeting>("meetings", { year }, (signal) => {
+    const all = getOpenF1<Meeting>("meetings", { year }, { signal });
+    return all.then((rows) => rows.filter((m) => m.meeting_name.includes("Grand Prix")));
+  }, seasonPolicy(year), opts);
 
 // Race sessions for the whole year in one query (sessions?year=N works).
-export const seasonRaceSessions = (year: number) =>
-  cached<Session>("sessions", { year, session_name: "Race" }, () =>
-    getOpenF1<Session>("sessions", { year, session_name: "Race" }), seasonPolicy(year));
+export const seasonRaceSessions = (year: number, opts?: { signal?: AbortSignal }) =>
+  cached<Session>("sessions", { year, session_name: "Race" }, (signal) =>
+    getOpenF1<Session>("sessions", { year, session_name: "Race" }, { signal }),
+    seasonPolicy(year), opts);
 
 // Sprint sessions (6 per season) — points-scoring, separate from seasonRaceSessions.
-export const seasonSprintSessions = (year: number) =>
-  cached<Session>("sessions", { year, session_name: "Sprint" }, () =>
-    getOpenF1<Session>("sessions", { year, session_name: "Sprint" }), seasonPolicy(year));
+export const seasonSprintSessions = (year: number, opts?: { signal?: AbortSignal }) =>
+  cached<Session>("sessions", { year, session_name: "Sprint" }, (signal) =>
+    getOpenF1<Session>("sessions", { year, session_name: "Sprint" }, { signal }),
+    seasonPolicy(year), opts);
 
 export interface SeasonPoint {
   meetingKey: number;
@@ -115,15 +117,15 @@ const bySession = <T extends { session_key: number }>(rows: T[]) => {
 };
 
 // Stage A: sessions + session_result + drivers → everything standings-shaped.
-export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<SeasonCore> => {
-  const ownMeetings = meetings ? null : await seasonMeetings(year);
+export const seasonCore = async (year: number, meetings?: Meeting[], opts?: { signal?: AbortSignal }): Promise<SeasonCore> => {
+  const ownMeetings = meetings ? null : await seasonMeetings(year, opts);
   const m = meetings ?? ownMeetings!.data;
 
   // Batch the whole season into 2 multi-value requests (OpenF1 accepts
   // repeated session_key). ponytail: swap for per-race cached requests only
   // if a single batch response outgrows browser memory (~rare).
-  const racesRes = await seasonRaceSessions(year);
-  const sprintsRes = await seasonSprintSessions(year);
+  const racesRes = await seasonRaceSessions(year, opts);
+  const sprintsRes = await seasonSprintSessions(year, opts);
   const races = racesRes.data;
   const sprints = sprintsRes.data;
   const sks = races.map((r) => r.session_key);
@@ -132,10 +134,12 @@ export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<Se
     // session_result spans Race + Sprint (points); mixed batch stays HTTP 200
     // as long as ≥1 key has rows — ponytail: future/empty sessions
     // contribute zero rows via the `?? []` below, no special-casing.
-    cached<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }, () =>
-      getOpenF1<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }), seasonPolicy(year)),
-    cached<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, () =>
-      getOpenF1<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }), seasonPolicy(year)),
+    cached<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }, (signal) =>
+      getOpenF1<ResultRow>("session_result", { session_key: [...sks, ...sprintSks] }, { signal }),
+      seasonPolicy(year), opts),
+    cached<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, (signal) =>
+      getOpenF1<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, { signal }),
+      seasonPolicy(year), opts),
   ]);
   const results = resultsRes.data;
   const drivers = driversRes.data;
@@ -268,18 +272,18 @@ export const seasonCore = async (year: number, meetings?: Meeting[]): Promise<Se
 // (in-flight dedupe when both stages run together → zero extra requests);
 // upgrade = pass core's rows in to skip the re-read when a caller needs a
 // standalone extras retry without touching those keys.
-export const seasonExtras = async (year: number): Promise<SeasonExtras> => {
-  const racesRes = await seasonRaceSessions(year);
-  const sprintsRes = await seasonSprintSessions(year);
+export const seasonExtras = async (year: number, opts?: { signal?: AbortSignal }): Promise<SeasonExtras> => {
+  const racesRes = await seasonRaceSessions(year, opts);
+  const sprintsRes = await seasonSprintSessions(year, opts);
   const sks = racesRes.data.map((r) => r.session_key);
   const sprintSks = sprintsRes.data.map((s) => s.session_key);
   const [pitRes, stintsRes, driversRes] = await Promise.all([
-    cached<SeasonPitStop>("pit", { session_key: sks }, () =>
-      getOpenF1<SeasonPitStop>("pit", { session_key: sks }), seasonPolicy(year)),
-    cached<SeasonStint>("stints", { session_key: sks }, () =>
-      getOpenF1<SeasonStint>("stints", { session_key: sks }), seasonPolicy(year)),
-    cached<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, () =>
-      getOpenF1<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }), seasonPolicy(year)),
+    cached<SeasonPitStop>("pit", { session_key: sks }, (signal) =>
+      getOpenF1<SeasonPitStop>("pit", { session_key: sks }, { signal }), seasonPolicy(year), opts),
+    cached<SeasonStint>("stints", { session_key: sks }, (signal) =>
+      getOpenF1<SeasonStint>("stints", { session_key: sks }, { signal }), seasonPolicy(year), opts),
+    cached<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, (signal) =>
+      getOpenF1<RaceDriver>("drivers", { session_key: [...sks, ...sprintSks] }, { signal }), seasonPolicy(year), opts),
   ]);
   const stale = racesRes.stale || sprintsRes.stale || pitRes.stale || stintsRes.stale || driversRes.stale;
   const pitBySession = bySession(pitRes.data);

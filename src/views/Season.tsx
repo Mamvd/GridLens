@@ -154,7 +154,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
   useEffect(() => {
     let alive = true;
     const controller = new AbortController();
-    seasonCore(year, meetings)
+    seasonCore(year, meetings, { signal: controller.signal })
       .then((r) => {
         if (alive) setCore({ year, data: r, stale: r.stale, error: "" });
       })
@@ -162,15 +162,13 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
         if ((e as Error)?.name === "AbortError") return;
         if (alive) setCore({ year, data: null, stale: false, error: String(e) });
       });
-    // ponytail: signal not threaded through seasonCore (data layer frozen) —
-    // alive + year-scoped payload guard staleness; abort activates once opts lands.
     return () => { alive = false; controller.abort(); };
   }, [year, meetings, coreRetry]);
 
   useEffect(() => {
     let alive = true;
     const controller = new AbortController();
-    seasonExtras(year)
+    seasonExtras(year, { signal: controller.signal })
       .then((r) => {
         if (alive) setExtras({ year, data: r, stale: r.stale, error: "" });
       })

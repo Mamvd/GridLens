@@ -133,6 +133,9 @@ export const Race = ({ meeting }: Props) => {
   const lastTabNavRef = useRef<{ to: string; at: number }>({ to: "", at: 0 });
   const inflight = useRef<Set<string>>(new Set());
   const resRef = useRef(res);
+  // one controller per generation; shared by base/tab/detail loads so the
+  // in-flight slices of a meeting all die on meeting change / unmount.
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const handleResize = () => setWidth(window.innerWidth);
@@ -151,11 +154,14 @@ export const Race = ({ meeting }: Props) => {
     if (key !== "base" && resRef.current[key].data !== undefined) return; // loaded → revisit costs nothing
     inflight.current.add(key);
     const done = () => { if (gen === genRef.current) inflight.current.delete(key); };
+    // current generation's controller is always live when startLoad fires
+    // (Retry/detail/tab paths run under the meeting that owns this gen).
+    const opts = { signal: abortRef.current?.signal };
 
     if (key === "base") {
       patch("drivers", { loading: true, error: undefined });
       patch("results", { loading: true, error: undefined });
-      loadRaceBase(sk, meeting.year).then(
+      loadRaceBase(sk, meeting.year, undefined, opts).then(
         (b) => {
           if (gen !== genRef.current) return;
           patch("drivers", { data: b.drivers, loading: false, stale: b.stale });
@@ -178,12 +184,12 @@ export const Race = ({ meeting }: Props) => {
 
     patch(key, { loading: true, error: undefined });
     const loader =
-      key === "laps" ? loadLaps(sk, meeting.year) :
-      key === "intervals" ? loadIntervals(sk, meeting.year) :
-      key === "stints" ? loadStints(sk, meeting.year) :
-      key === "pit" ? loadPit(sk, meeting.year) :
-      key === "grid" ? loadGrid(sk, meeting.year) :
-      loadOvertakes(sk, meeting.year);
+      key === "laps" ? loadLaps(sk, meeting.year, undefined, opts) :
+      key === "intervals" ? loadIntervals(sk, meeting.year, undefined, opts) :
+      key === "stints" ? loadStints(sk, meeting.year, undefined, opts) :
+      key === "pit" ? loadPit(sk, meeting.year, undefined, opts) :
+      key === "grid" ? loadGrid(sk, meeting.year, undefined, opts) :
+      loadOvertakes(sk, meeting.year, undefined, opts);
     loader.then(
       (v) => {
         if (gen !== genRef.current) return;
@@ -212,7 +218,8 @@ export const Race = ({ meeting }: Props) => {
     setRivalDriver(null);
     let alive = true;
     const controller = new AbortController();
-    seasonRaceSessions(meeting.year)
+    abortRef.current = controller;
+    seasonRaceSessions(meeting.year, { signal: controller.signal })
       .then((sessionsRes) => {
         if (!alive || gen !== genRef.current) return;
         const race = sessionsRes.data.find((s) => s.meeting_key === meeting.meeting_key);
@@ -225,10 +232,11 @@ export const Race = ({ meeting }: Props) => {
         if ((e as Error)?.name === "AbortError") return;
         if (alive && gen === genRef.current) setError(String(e));
       });
-    // ponytail: signal not threaded through seasonRaceSessions/loadRaceBase
-    // (data layer frozen) — gen + alive guard stale meeting state; abort
-    // activates once those accept opts.
-    return () => { alive = false; controller.abort(); };
+    return () => {
+      alive = false;
+      controller.abort();
+      if (abortRef.current === controller) abortRef.current = null;
+    };
   }, [meeting, reloadKey, startLoad]);
 
   // tab change (URL-driven): fetch this tab's resources minus already-loaded

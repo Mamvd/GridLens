@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import {
-  YEAR, MONACO_SLUG, MONACO_SK, EXPECTED_CHAMPIONSHIP, installFixtures,
+  YEAR, MONACO_SLUG, EXPECTED_CHAMPIONSHIP, installFixtures,
 } from "./fixtures.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");

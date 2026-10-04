@@ -348,7 +348,11 @@ export interface Overtake {
 export interface StartingGrid {
   session_key: number;
   driver_number: number;
-  grid_position: number;
+  // Live rows document `position` (openf1.org docs: response example and the
+  // `position<=3` filter both use `position`); older/synthetic payloads used
+  // `grid_position`. Read `grid_position ?? position` at the call site.
+  grid_position?: number;
+  position?: number;
 }
 
 export interface TeamRadio {

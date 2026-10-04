@@ -203,6 +203,9 @@ export const computeStrategies = (b: RaceBundle): DriverStrategy[] =>
         null,
       );
       const stopTimes = dPits.map((p) => p.stop_duration).filter((v): v is number => v != null);
+      // starting_grid: live docs shape is `position`; `grid_position` kept as
+      // alias for older payloads — both accepted, grid_position wins if sent.
+      const gridRow = b.grid.find((g) => g.driver_number === r.driver_number);
       return {
         driver,
         finishPosition: r.position,
@@ -215,7 +218,7 @@ export const computeStrategies = (b: RaceBundle): DriverStrategy[] =>
         bestSector: bestSec,
         overtakesMade: b.overtakes.filter((o) => o.overtaking_driver_number === r.driver_number).length,
         overtakesLost: b.overtakes.filter((o) => o.overtaken_driver_number === r.driver_number).length,
-        gridPosition: b.grid.find((g) => g.driver_number === r.driver_number)?.grid_position ?? null,
+        gridPosition: gridRow?.grid_position ?? gridRow?.position ?? null,
       };
     })
     .sort((a, b) => (a.finishPosition ?? 99) - (b.finishPosition ?? 99));

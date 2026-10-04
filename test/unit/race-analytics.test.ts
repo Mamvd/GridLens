@@ -143,6 +143,20 @@ describe("computeStrategies", () => {
     expect(verstappen.driver.driver_number).toBe(1);
   });
 
+  it("starting_grid live docs shape: `position` (no grid_position) resolves grid", () => {
+    // openf1.org docs example rows carry `position`, not `grid_position` —
+    // reading only grid_position rendered 'Grid —' for every driver live.
+    const b = mkBundle({
+      grid: [
+        { session_key: 900, driver_number: 1, position: 4 },
+        { session_key: 900, driver_number: 16, grid_position: 3, position: 3 },
+      ] as StartingGrid[],
+    });
+    const s = computeStrategies(b);
+    expect(s.find((x) => x.driver.driver_number === 1)!.gridPosition).toBe(4);
+    expect(s.find((x) => x.driver.driver_number === 16)!.gridPosition).toBe(3); // alias unchanged
+  });
+
   it("missing compound normalises to '?'; null stop_duration → avgStop null", () => {
     const leclerc = computeStrategies(mkBundle())[1];
     expect(leclerc.compounds).toEqual(["?"]);

@@ -1,6 +1,7 @@
 // Two-tier cache for OpenF1 responses.
 // - in-memory Map: always, session lifetime
-// - localStorage: only when persist && serialized < 500 KB, entry shape {d,f}
+// - localStorage: only when persist && serialized under the per-resource cap
+//   (~600 KB; "intervals" excluded — memory-only), entry shape {d,f}
 // Keys are versioned (gridlens:v2:…) so old openf1:* / v1 entries never mix
 // with the new shape — legacy keys are purged on module init.
 // ponytail: revalidate-on-expiry only (no SWR) — fits the bundle-load +
@@ -89,6 +90,80 @@ const getCachedEntry = <T>(resource: string, ops: Record<string, string | number
 
 export interface CachedResult<T> { data: T[]; stale: boolean }
 
+// --- NF-01: cache-only reads (no fetch) for the single↔batch key bridge ---
+// The season pipeline batches rows under {session_key:[...all]}; race views
+// read single-key {session_key:sk}. On a single-key miss the race loader may
+// serve from a fresh batch entry instead of refetching. ponytail: upgrade =
+// query-side join / key aliases inside cached() so callers need no bridge.
+
+// "gridlens:v2:openf1:resource?k=v&…" → { resource, ops } (string values)
+const parseCacheKey = (key: string): { resource: string; ops: Record<string, string> } | null => {
+  if (!key.startsWith(LS_PREFIX)) return null;
+  const body = key.slice(LS_PREFIX.length);
+  const q = body.indexOf("?");
+  if (q < 0) return null;
+  const ops: Record<string, string> = {};
+  for (const pair of body.slice(q + 1).split("&")) {
+    const eq = pair.indexOf("=");
+    if (eq > 0) ops[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return { resource: body.slice(0, q), ops };
+};
+
+// array ops are joined with "|" in cacheKey — session_key lists only (numbers)
+const sessionKeyList = (ops: Record<string, string>): number[] | null =>
+  ops.session_key == null
+    ? null
+    : ops.session_key.split("|").map(Number).filter((n) => Number.isFinite(n));
+
+// fresh single-key entry, cache-only — same freshness rules as cached() but
+// NON-destructive: a stale mem entry must stay put for cached()'s
+// stale-if-error rescue (it is the only copy of memory-only payloads).
+export const peekCached = <T>(
+  resource: string,
+  ops: Record<string, string | number | boolean | any[]>,
+  ttlMs: number,
+): T[] | undefined => {
+  const key = cacheKey(resource, ops);
+  const m = mem.get(key);
+  if (m && isFresh(m, ttlMs)) return m.d as T[];
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { d: T[]; f: number };
+      if (parsed && typeof parsed.f === "number" && "d" in parsed && isFresh(parsed, ttlMs)) {
+        mem.set(key, parsed); // same LS→mem promotion as getCachedEntry
+        return parsed.d;
+      }
+    }
+  } catch { /* corrupt — treat as absent, leave cleanup to cached() */ }
+  return undefined;
+};
+
+// fresh BATCH entry (any session_key list containing sessionKey) in mem or LS.
+// Scans only this resource's keys; stale entries are treated as absent.
+export const peekCachedBatch = <T>(resource: string, sessionKey: number, ttlMs: number): T[] | undefined => {
+  for (const [key, m] of mem) {
+    if (!isFresh(m, ttlMs)) continue;
+    const p = parseCacheKey(key);
+    if (p && p.resource === resource && sessionKeyList(p.ops)?.includes(sessionKey)) return m.d as T[];
+  }
+  try {
+    const prefix = `${LS_PREFIX}${resource}?`;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(prefix)) continue;
+      const p = parseCacheKey(key);
+      if (!p || !sessionKeyList(p.ops)?.includes(sessionKey)) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as { d: T[]; f: number };
+      if (parsed && typeof parsed.f === "number" && "d" in parsed && isFresh(parsed, ttlMs)) return parsed.d;
+    }
+  } catch { /* corrupt/absent — treat as miss */ }
+  return undefined;
+};
+
 // Any-age entry for stale-if-error rescue. mem first: memory-only payloads
 // (intervals > 500 KB) never reach localStorage, and mem can be newer when a
 // quota-blocked LS write silently failed.
@@ -156,7 +231,9 @@ export const cached = async <T>(
         const json = JSON.stringify({ d: data, f });
         // ponytail: heavy resources (intervals ≈ 4 MB/race) stay memory-only;
         // they'd otherwise eat the whole ~5 MB localStorage quota on the first race.
-        if (json.length < 500_000) {
+        // laps (~564 KB) exceeds the old 500 KB gate but fits the raised ~600 KB
+        // per-entry cap; total LS stays protected by the quota fallback below.
+        if (resource !== "intervals" && json.length < 600_000) {
           try { localStorage.setItem(key, json); } catch { /* quota exceeded — mem still works */ }
         }
       }

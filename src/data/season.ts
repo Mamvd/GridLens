@@ -124,10 +124,15 @@ export const seasonCore = async (year: number, meetings?: Meeting[], opts?: { si
   const m = meetings ?? ownMeetings!.data;
 
   // Batch the whole season into 2 multi-value requests (OpenF1 accepts
-  // repeated session_key). ponytail: swap for per-race cached requests only
-  // if a single batch response outgrows browser memory (~rare).
-  const racesRes = await seasonRaceSessions(year, opts);
-  const sprintsRes = await seasonSprintSessions(year, opts);
+  // repeated session_key). PF-09: race + sprint session lookups are
+  // independent — run them together so they overlap in the request limiter
+  // (sequential awaits paid two limiter slots + 500 ms spacings in series).
+  // ponytail: swap for per-race cached requests only if a single batch
+  // response outgrows browser memory (~rare).
+  const [racesRes, sprintsRes] = await Promise.all([
+    seasonRaceSessions(year, opts),
+    seasonSprintSessions(year, opts),
+  ]);
   const races = racesRes.data;
   const sprints = sprintsRes.data;
   const sks = races.map((r) => r.session_key);
@@ -275,8 +280,12 @@ export const seasonCore = async (year: number, meetings?: Meeting[], opts?: { si
 // upgrade = pass core's rows in to skip the re-read when a caller needs a
 // standalone extras retry without touching those keys.
 export const seasonExtras = async (year: number, opts?: { signal?: AbortSignal }): Promise<SeasonExtras> => {
-  const racesRes = await seasonRaceSessions(year, opts);
-  const sprintsRes = await seasonSprintSessions(year, opts);
+  // PF-09: same parallel start as seasonCore — independent lookups, no data
+  // dependency between them (both feed the batched key lists below).
+  const [racesRes, sprintsRes] = await Promise.all([
+    seasonRaceSessions(year, opts),
+    seasonSprintSessions(year, opts),
+  ]);
   const sks = racesRes.data.map((r) => r.session_key);
   const sprintSks = sprintsRes.data.map((s) => s.session_key);
   const [pitRes, stintsRes, driversRes] = await Promise.all([

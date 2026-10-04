@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   BarChart, Bar,
@@ -13,9 +13,10 @@ import { slugForMeeting } from "../lib/slug";
 import { resourcePhase } from "../lib/resource-state";
 import {
   chartSelect, teammateDashed, fallbackPalette, ensureVisible,
-  resolveTeamColours, FALLBACK_HUES, type ChartRange,
+  resolveTeamColours, FALLBACK_HUES, type ChartRange, champTipRows,
+  SEARCH_DEBOUNCE_MS,
 } from "../lib/chart-select";
-import { ChartCard, ChartTooltip } from "@/components/charts/ChartCard";
+import { ChartCard, ChartTooltip, buildSrTable } from "@/components/charts/ChartCard";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -35,7 +36,7 @@ interface Props {
 const SECTION = "mb-3 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground";
 const MEETING_GRID = "grid grid-cols-1 gap-2 md:grid-cols-[repeat(auto-fill,minmax(200px,1fr))]";
 const AXIS = { stroke: "var(--border)" };
-const TICK = { fontSize: 10, fill: "var(--muted-foreground)" };
+const TICK = { fontSize: 11, fill: "var(--muted-foreground)" };
 const GRID_PROPS = { stroke: "var(--border)", strokeDasharray: "3 3" };
 
 const fmtNum = (v: unknown) => {
@@ -46,23 +47,42 @@ const fmtNum = (v: unknown) => {
 // "Bahrain Grand Prix" → "Bahrain" for axis density.
 const raceTick = (v: string) => v.replace(/\s+Grand Prix$/i, "");
 
-// tooltip: "driver · round · points" (spec format), text tokens only —
-// never the series colour, per dataviz rules.
-const champTip = (props: {
-  active: boolean;
-  label?: string | number;
-  payload: ReadonlyArray<{
-    name?: string | number;
-    value?: number | string | ReadonlyArray<number | string>;
-    payload?: unknown;
-  }>;
-}) => {
+// tooltip: meeting header + one row per series (driver · pts). Recharts'
+// payload carries EVERY series at the hovered index — all are rendered
+// (UX-01), the hovered line's row first; colour appears only as a swatch
+// dot (text stays tokens, per dataviz rules).
+const champTip = (
+  props: {
+    active: boolean;
+    label?: string | number;
+    payload: ReadonlyArray<{
+      name?: string | number;
+      value?: number | string | ReadonlyArray<number | string>;
+      color?: string;
+      payload?: unknown;
+    }>;
+  },
+  hovered: string | null,
+) => {
   if (!props.active || !props.payload.length) return null;
-  const row = props.payload[0];
-  const data = (row.payload ?? {}) as { race?: string };
+  const rows = champTipRows(props.payload);
+  const lead = hovered != null ? rows.findIndex((r) => r.name === hovered) : -1;
+  if (lead > 0) rows.unshift(...rows.splice(lead, 1));
+  const race = raceTick(String(rows[0]?.race || props.label || ""));
   return (
     <div className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-card-foreground shadow-md">
-      {String(row.name ?? "")} · {raceTick(String(data.race ?? props.label ?? ""))} · {fmtNum(row.value)} pts
+      <div className="mb-1 font-semibold text-muted-foreground">{race}</div>
+      {rows.map((r) => (
+        <div key={r.name} className="flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className="inline-block h-2 w-2 shrink-0 rounded-full"
+            style={{ backgroundColor: r.color ?? "var(--border)" }}
+          />
+          <span>{r.name}</span>
+          <span className="text-muted-foreground">· {fmtNum(r.value)} pts</span>
+        </div>
+      ))}
     </div>
   );
 };
@@ -146,6 +166,25 @@ const stepLabel = (s: StageStatus) => (s === "ready" ? "✓" : s === "failed" ? 
 
 export const Season = ({ year, meetings, meetingsStale }: Props) => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // UX-02: derive initial state from URL params once; invalid values fall
+  // back to defaults (range ∉ {top5,top10,all} → top10, missing q → "").
+  const [chartRange, setChartRange] = useState<ChartRange>(() => {
+    const r = searchParams.get("range");
+    return (r === "top5" || r === "top10" || r === "all") ? r as ChartRange : "top10";
+  });
+  const [chartSearch, setChartSearch] = useState(() => searchParams.get("q") ?? "");
+  // PF-05: filter on a debounced copy — raw keystrokes re-render the whole
+  // Season tree otherwise (chartSelect + LineChart visible-set rebuild per
+  // key, 67–152 ms/frame). URL sync below rides the same debounced value,
+  // so `q` is debounced before write without a second timer.
+  const [appliedSearch, setAppliedSearch] = useState(chartSearch);
+  useEffect(() => {
+    const t = setTimeout(() => setAppliedSearch(chartSearch), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [chartSearch]);
+
   const [core, setCore] = useState<Stage<SeasonCore>>({ year: -1, data: null, stale: false, error: "" });
   const [extras, setExtras] = useState<Stage<SeasonExtras>>({ year: -1, data: null, stale: false, error: "" });
   const [coreRetry, setCoreRetry] = useState(0);
@@ -215,8 +254,6 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
 
   // #15 championship-chart interactions: hover dims, click isolates
   // (persists until re-click / Show all), legend buttons + search + ranges.
-  const [chartRange, setChartRange] = useState<ChartRange>("top10");
-  const [chartSearch, setChartSearch] = useState("");
   const [hovered, setHovered] = useState<string | null>(null);
   const [isolated, setIsolated] = useState<string | null>(null);
 
@@ -252,27 +289,131 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
     () => chartSelect({
       order: standingsSeries.names,
       range: chartRange,
-      search: chartSearch,
+      search: appliedSearch,
       hidden,
       focus: hovered ?? isolate,
     }),
-    [standingsSeries.names, chartRange, chartSearch, hidden, hovered, isolate],
+    [standingsSeries.names, chartRange, appliedSearch, hidden, hovered, isolate],
   );
   const toggleIsolate = (name: string) => setIsolated((iso) => (iso === name ? null : name));
 
-  const topTeams = coreReady && coreData ? coreData.teamChampionship.slice(0, 10) : [];
-  const topStrategies = (extrasData?.strategyCount ?? []).filter((s) => s.strategy !== "no-data").slice(0, 8);
+  // A2: SR-only table — visible drivers × races, values straight from the
+  // chart's own rows (drivers who hadn't scored yet at a race → "—").
+  const champSrTable = useMemo(
+    () => buildSrTable(
+      standingsSeries.rows.map((r) => String(r.race ?? "")),
+      sel.visible.map((n) => ({
+        name: n,
+        data: standingsSeries.rows.map((r) => (typeof r[n] === "number" ? (r[n] as number) : null)),
+      })),
+    ),
+    [standingsSeries.rows, sel.visible],
+  );
+
+  // UX-02: sync range + q to the URL (replace, not push — never floods
+  // history). q rides appliedSearch, so the write is debounced by the same
+  // timer as the filter; defaults (top10, empty q) are omitted from the URL.
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams);
+    if (chartRange !== "top10") next.set("range", chartRange);
+    else next.delete("range");
+    if (appliedSearch) next.set("q", appliedSearch);
+    else next.delete("q");
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [chartRange, appliedSearch, searchParams, setSearchParams]);
+
+  // Nearest-line hit-test (recharts Line ignores onMouseEnter in v3)
+  const chartRef = useRef<HTMLDivElement>(null);
+  const pointsRef = useRef<Record<string, ReadonlyArray<{ x: number; y: number; race: string }>> | null>(null);
+  useEffect(() => {
+    const chartDiv = chartRef.current;
+    if (!chartDiv || !chartDiv.querySelector) return;
+    const points: Record<string, ReadonlyArray<{ x: number; y: number; race: string }>> = {};
+    for (const name of sel.visible) {
+      const path = chartDiv.querySelector<SVGPathElement>(`path.recharts-line-curve[stroke="${colourOf(name)}"]`);
+      if (!path) continue;
+      const len = path.getTotalLength();
+      const pts: { x: number; y: number; race: string }[] = [];
+      for (let i = 0; i < standingsSeries.rows.length; i++) {
+        const pt = path.getPointAtLength((len * i) / (standingsSeries.rows.length - 1 || 1));
+        const ctm = path.getScreenCTM();
+        if (!ctm) continue;
+        const screen = new DOMPoint(pt.x, pt.y).matrixTransform(ctm);
+        const rect = chartDiv.getBoundingClientRect();
+        pts.push({
+          x: screen.x - rect.left,
+          y: screen.y - rect.top,
+          race: String(standingsSeries.rows[i]?.race ?? ""),
+        });
+      }
+      if (pts.length) points[name] = pts;
+    }
+    pointsRef.current = points;
+  }, [sel.visible, standingsSeries.rows, colourOf]);
+
+  useEffect(() => {
+    const root = chartRef.current;
+    if (!root) return;
+    const handleMove = (e: MouseEvent) => {
+      const rect = root.getBoundingClientRect();
+      const cy = e.clientY - rect.top;
+      let best = { name: null as string | null, dist: Infinity };
+      for (const [name, pts] of Object.entries(pointsRef.current ?? {}) as [string, { x: number; y: number; race: string }[]][]) {
+        for (const p of pts) {
+          const d = Math.abs(p.y - cy);
+          if (d < best.dist) {
+            best = { name, dist: d };
+          }
+        }
+      }
+      if (best.name && best.name !== hovered) setHovered(best.name);
+    };
+    const handleLeave = () => setHovered(null);
+    root.addEventListener("mousemove", handleMove);
+    root.addEventListener("mouseleave", handleLeave);
+    return () => {
+      root.removeEventListener("mousemove", handleMove);
+      root.removeEventListener("mouseleave", handleLeave);
+    };
+  }, [hovered, sel.visible]);
+
+  // PF-06: stable row arrays — inline slice/filter handed Recharts a fresh
+  // reference every parent render, restarting bar animations on hover/resize
+  // with identical geometry (first mount still animates).
+  const topTeams = useMemo(
+    () => (coreReady && coreData ? coreData.teamChampionship.slice(0, 10) : []),
+    [coreReady, coreData],
+  );
+  const topStrategies = useMemo(
+    () => (extrasData?.strategyCount ?? []).filter((s) => s.strategy !== "no-data").slice(0, 8),
+    [extrasData],
+  );
+  // A2: SR tables for the two bar charts
+  const teamsSrTable = useMemo(
+    () => buildSrTable(
+      topTeams.map((t) => t.team),
+      [{ name: "Points", data: topTeams.map((t) => t.points) }],
+    ),
+    [topTeams],
+  );
+  const strategiesSrTable = useMemo(
+    () => buildSrTable(
+      topStrategies.map((s) => s.strategy),
+      [{ name: "Races", data: topStrategies.map((s) => s.count) }],
+    ),
+    [topStrategies],
+  );
   const stagePending = coreStatus !== "ready" || extrasStatus !== "ready";
   const coreError = core.year === year ? core.error : "";
   const extrasError = extras.year === year ? extras.error : "";
 
   return (
     <div className="space-y-8">
-      {stagePending && (
-        <div role="status" className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-          {`calendar ✓ · championship data ${stepLabel(coreStatus)} · strategy data ${stepLabel(extrasStatus)}`}
-        </div>
-      )}
+      <div role="status" className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground min-h-[50px]">
+        {stagePending ? `calendar ✓ · championship data ${stepLabel(coreStatus)} · strategy data ${stepLabel(extrasStatus)}` : ' '}
+      </div>
       {(coreStale || extrasStale || meetingsStale) && (
         <div className="rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
           Data may be out of date (latest revalidation failed).
@@ -300,6 +441,8 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
                         src={m.country_flag}
                         alt=""
                         width={24}
+                        loading="lazy"
+                        decoding="async"
                         className="h-auto w-6 shrink-0 rounded-[2px]"
                       />
                       <span className="min-w-0">
@@ -393,43 +536,62 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
               <ChartCard
                 title="Drivers' championship"
                 subtitle={`Cumulative points · ${sel.visible.length} shown · Sprint points merged into their weekend's column`}
-                srSummary="Line chart of cumulative championship points per driver across each Grand Prix; legend and table below show the same data."
+                srSummary="Line chart of cumulative championship points per driver across each Grand Prix; an sr-only data table lists every visible driver's score at each race."
+                srTable={champSrTable}
               >
-                <LineChart data={standingsSeries.rows}>
-                  <CartesianGrid {...GRID_PROPS} />
-                  <XAxis
-                    dataKey="race"
-                    {...AXIS}
-                    tick={TICK}
-                    interval={1}
-                    tickFormatter={raceTick}
-                  />
-                  <YAxis {...AXIS} tick={TICK} width={45} />
-                  <ChartTooltip content={champTip} />
-                  {sel.visible.map((n) => {
-                    const c = colourOf(n);
-                    const dash = dashedSet.has(n);
-                    const dim = sel.focus != null && sel.focus !== n;
-                    return (
-                      <Line
-                        key={n}
-                        dataKey={n}
-                        stroke={c}
-                        strokeWidth={2}
-                        strokeOpacity={dim ? 0.15 : 1}
-                        strokeDasharray={dash ? "6 4" : undefined}
-                        // teammate marker difference: dashed 2nd driver also carries dots
-                        dot={dash ? { r: 2.5, strokeWidth: 0, fill: c } : false}
-                        activeDot={{ r: 4 }}
-                        // off: 20-line range switches must not queue 1.5s animations
-                        isAnimationActive={false}
-                        onMouseEnter={() => setHovered(n)}
-                        onMouseLeave={() => setHovered(null)}
-                        onClick={() => toggleIsolate(n)}
-                      />
-                    );
-                  })}
-                </LineChart>
+                <div
+                  ref={chartRef}
+                  onMouseMove={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const cy = e.clientY - rect.top;
+                    let best = { name: null as string | null, dist: Infinity };
+                    for (const [name, pts] of Object.entries(pointsRef.current ?? {}) as [string, { x: number; y: number; race: string }[]][]) {
+                      for (const p of pts) {
+                        const d = Math.abs(p.y - cy);
+                        if (d < best.dist) {
+                          best = { name, dist: d };
+                        }
+                      }
+                    }
+                    if (best.name && best.name !== hovered) setHovered(best.name);
+                  }}
+                  onMouseLeave={() => setHovered(null)}
+                  style={{ position: "relative" }}
+                >
+                  <LineChart data={standingsSeries.rows}>
+                    <CartesianGrid {...GRID_PROPS} />
+                    <XAxis
+                      dataKey="race"
+                      {...AXIS}
+                      tick={TICK}
+                      interval={1}
+                      tickFormatter={raceTick}
+                    />
+                    <YAxis {...AXIS} tick={TICK} width={45} />
+                    <ChartTooltip content={(p) => champTip(p, hovered)} />
+                    {sel.visible.map((n) => {
+                      const c = colourOf(n);
+                      const dash = dashedSet.has(n);
+                      const dim = sel.focus != null && sel.focus !== n;
+                      return (
+                        <Line
+                          key={n}
+                          dataKey={n}
+                          stroke={c}
+                          strokeWidth={2}
+                          strokeOpacity={dim ? 0.15 : 1}
+                          strokeDasharray={dash ? "6 4" : undefined}
+                          // teammate marker difference: dashed 2nd driver also carries dots
+                          dot={dash ? { r: 2.5, strokeWidth: 0, fill: c } : false}
+                          activeDot={{ r: 4 }}
+                          // off: 20-line range switches must not queue 1.5s animations
+                          isAnimationActive={false}
+                          onClick={() => toggleIsolate(n)}
+                        />
+                      );
+                    })}
+                  </LineChart>
+                </div>
               </ChartCard>
             )}
           </>
@@ -451,18 +613,12 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
                 title="Constructors' championship"
                 subtitle="Top 10 teams"
                 srSummary="Bar chart of total championship points for the top 10 constructor teams."
+                srTable={teamsSrTable}
               >
-                <BarChart data={topTeams}>
+                <BarChart data={topTeams} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
                   <CartesianGrid {...GRID_PROPS} />
-                  <XAxis
-                    dataKey="team"
-                    {...AXIS}
-                    tick={TICK}
-                    interval={0}
-                    angle={-20}
-                    height={60}
-                  />
-                  <YAxis {...AXIS} tick={TICK} width={45} allowDecimals={false} />
+                  <XAxis type="number" tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
+                  <YAxis type="category" dataKey="team" width={110} tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" interval={0} />
                   <ChartTooltip formatter={(value) => [fmtNum(value), "Points"]} />
                   <Bar dataKey="points" name="Points" fill="var(--chart-4)" />
                 </BarChart>
@@ -480,6 +636,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
               title="Most common strategies"
               subtitle="Compound sequences across the season"
               srSummary="Horizontal bar chart counting how many races each tyre compound sequence was used across the season."
+              srTable={strategiesSrTable}
             >
               <BarChart data={topStrategies} layout="vertical">
                 <CartesianGrid {...GRID_PROPS} />
@@ -522,30 +679,33 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
           >
             <Card>
               <CardContent className="pt-6">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Driver</TableHead>
-                      <TableHead>Final team</TableHead>
-                      <TableHead className="text-right">Pts</TableHead>
-                      <TableHead className="text-right">Wins</TableHead>
-                      <TableHead className="text-right">Podiums</TableHead>
-                      <TableHead className="text-right">DNF</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {(coreData?.championship ?? []).map((d) => (
-                      <TableRow key={d.driverName}>
-                        <TableCell className="font-medium">{d.driverName}</TableCell>
-                        <TableCell className="text-muted-foreground">{d.team}</TableCell>
-                        <TableCell className="text-right tabular-nums">{d.points}</TableCell>
-                        <TableCell className="text-right tabular-nums">{d.wins}</TableCell>
-                        <TableCell className="text-right tabular-nums">{d.podiums}</TableCell>
-                        <TableCell className="text-right tabular-nums">{d.dnf}</TableCell>
+                <div className="relative" aria-label="Drivers points table scrollable horizontally">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Driver</TableHead>
+                        <TableHead>Final team</TableHead>
+                        <TableHead className="text-right">Pts</TableHead>
+                        <TableHead className="text-right">Wins</TableHead>
+                        <TableHead className="text-right">Podiums</TableHead>
+                        <TableHead className="text-right">DNF</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {(coreData?.championship ?? []).map((d) => (
+                        <TableRow key={d.driverName}>
+                          <TableCell className="font-medium">{d.driverName}</TableCell>
+                          <TableCell className="text-muted-foreground">{d.team}</TableCell>
+                          <TableCell className="text-right tabular-nums">{d.points}</TableCell>
+                          <TableCell className="text-right tabular-nums">{d.wins}</TableCell>
+                          <TableCell className="text-right tabular-nums">{d.podiums}</TableCell>
+                          <TableCell className="text-right tabular-nums">{d.dnf}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  <div className="pointer-events-none absolute right-0 top-0 h-full w-10 bg-gradient-to-l from-card to-transparent" aria-hidden="true" />
+                </div>
               </CardContent>
             </Card>
           </StageSlot>

@@ -78,8 +78,11 @@ const main = async () => {
       } else {
         let allMatch = true;
         const bad = [];
+        // A2 adds sr-only chart tables carrying driver names + numbers —
+        // scope to the visible drivers table (skip .sr-only).
+        const visibleTables = page.locator("table:not(.sr-only)");
         for (const row of EXPECTED_CHAMPIONSHIP) {
-          const tr = page.locator("table tbody tr", { hasText: row.name }).first();
+          const tr = visibleTables.locator("tbody tr", { hasText: row.name }).first();
           if (!(await tr.count())) { allMatch = false; bad.push(`${row.name}: missing`); continue; }
           const cells = await tr.locator("td").allInnerTexts();
           // Driver | Final team | Pts | Wins | Podiums | DNF
@@ -91,7 +94,7 @@ const main = async () => {
         if (allMatch) pass("1. season championship table renders", "pts/wins/podiums match fixtures");
         else fail("1. season championship table renders", bad.join("; "));
         // T5: column header renamed
-        const header = await page.locator("table thead").innerText();
+        const header = await visibleTables.locator("thead").first().innerText();
         if (header.includes("Final team")) pass("1b. drivers table header is 'Final team'");
         else fail("1b. drivers table header is 'Final team'", header.replace(/\n/g, "|"));
         // T4: "All" range shows every driver (6), not a 20-cap leftover
@@ -247,6 +250,135 @@ const main = async () => {
       await waitText(page, "Driver Strategies", 20000);
       if (issues.length === 0) pass("7. console clean on fixture-driven season + race");
       else fail("7. console clean on fixture-driven season + race", issues.slice(0, 5).join(" | "));
+      await ctx.close();
+    }
+
+    // 8. URL state (UX-02) + accessible names (A1) + legends/copy (UX-06/07)
+    {
+      const ctx = await browser.newContext();
+      await installFixtures(ctx);
+      const page = await ctx.newPage();
+
+      // 8a. season deep link: range=top5 → 5 legend buttons; q=lec → only Leclerc
+      await page.goto(`${origin}/season/${YEAR}?range=top5`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Verstappen", 20000);
+      await sleep(400);
+      let legendCount = await page.locator('[data-testid="champ-legend"] button').count();
+      if (legendCount === 5) pass("8a. ?range=top5 deep link caps legend at 5");
+      else fail("8a. ?range=top5 deep link caps legend at 5", `legend=${legendCount}`);
+
+      await page.goto(`${origin}/season/${YEAR}?range=all&q=lecl`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Verstappen", 20000);
+      await sleep(400);
+      const legendText = await page.locator('[data-testid="champ-legend"]').innerText();
+      if (legendText.includes("Leclerc") && !legendText.includes("Norris")) {
+        pass("8b. ?q=lecl deep link filters the legend");
+      } else fail("8b. ?q=lecl deep link filters the legend", legendText.replace(/\n/g, "|"));
+
+      // 8c. race deep link: ?driver=55 selects Sainz (not the P1 default)
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pace?driver=55`, { waitUntil: "domcontentloaded" });
+      const sawSainz = await waitText(page, "Carlos Sainz", 20000);
+      const driverTrigger = page.getByRole("combobox", { name: "Driver" }).first();
+      const triggerText = await driverTrigger.innerText().catch(() => "");
+      if (sawSainz && triggerText.includes("Sainz")) {
+        pass("8c. ?driver=55 deep link selects Sainz on Pace");
+      } else fail("8c. ?driver=55 deep link selects Sainz on Pace", `trigger="${triggerText}"`);
+
+      // 8d. invalid ?driver=999 → P1 default (Verstappen) on load
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pace?driver=999`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Verstappen", 20000);
+      await sleep(400);
+      const invalidTrigger = await page.getByRole("combobox", { name: "Driver" }).first().innerText().catch(() => "");
+      if (invalidTrigger.includes("Verstappen")) {
+        pass("8d. invalid ?driver falls back to P1 default");
+      } else fail("8d. invalid ?driver falls back to P1 default", `trigger="${invalidTrigger}"`);
+
+      // 8e. tab switch carries ?driver= in the URL (shareable across tabs)
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pace?driver=55&compare=4`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Carlos Sainz", 20000);
+      await page.getByRole("tab", { name: "Gaps" }).click();
+      await page.waitForURL((u) => u.pathname.endsWith("/gaps"), { timeout: 10000 });
+      await waitText(page, "Gap to Car Ahead", 20000);
+      const gapsUrl = page.url();
+      if (gapsUrl.includes("driver=55") && gapsUrl.includes("compare=4")) {
+        pass("8e. tab change preserves driver/compare query params");
+      } else fail("8e. tab change preserves driver/compare query params", gapsUrl);
+
+      // 8f. A1: named comboboxes (Gaps: Driver + Compare driver; header Season)
+      const named = await Promise.all([
+        page.getByRole("combobox", { name: "Driver" }).count(),
+        page.getByRole("combobox", { name: "Compare driver" }).count(),
+        page.getByRole("combobox", { name: "Season" }).count(),
+      ]);
+      if (named[0] >= 1 && named[1] >= 1 && named[2] === 1) {
+        pass("8f. A1 named comboboxes (Driver, Compare driver, Season)", named.join("/"));
+      } else fail("8f. A1 named comboboxes (Driver, Compare driver, Season)", named.join("/"));
+
+      // 8g. UX-07: fastest-lap text names the driver
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pace`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "fastest lap", 20000);
+      const paceText = await bodyText(page);
+      if (/Verstappen fastest lap \d/.test(paceText)) pass("8g. UX-07 fastest lap names the driver");
+      else fail("8g. UX-07 fastest lap names the driver", paceText.slice(0, 300));
+
+      // 8h. UX-06: overtakes chart exposes a legend (Made / Lost swatches)
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pit`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Overtakes Made", 20000);
+      await sleep(400);
+      const legends = await page.locator(".recharts-legend-wrapper").count();
+      const legendItems = await page.locator(".recharts-legend-item").allInnerTexts();
+      if (legends >= 1 && legendItems.includes("Made") && legendItems.includes("Lost")) {
+        pass("8h. UX-06 overtakes legend visible (Made/Lost)", legendItems.join("|"));
+      } else fail("8h. UX-06 overtakes legend visible (Made/Lost)", `wrappers=${legends} items=${legendItems.join("|")}`);
+
+      // 8i. A2: sr-only chart data table exposes driver names + values
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pace`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Sector Times", 20000);
+      await sleep(400);
+      const srTables = await page.locator('table.sr-only[aria-label="Chart data table"]').count();
+      // innerText lies for clipped (sr-only) nodes — read textContent
+      const srTableText = srTables > 0
+        ? await page.locator('table.sr-only[aria-label="Chart data table"]').first().evaluate((el) => el.textContent ?? "")
+        : "";
+      if (srTables >= 1 && /Sector 1/.test(srTableText) && /\d+\.\d{3}/.test(srTableText)) {
+        pass("8i. A2 sr-only data table exposes series + values", `${srTables} table(s)`);
+      } else fail("8i. A2 sr-only data table exposes series + values", `tables=${srTables} text=${srTableText.slice(0, 120)}`);
+
+      // 8j. UX-02 write direction: selection → URL → reload reproduces the view
+      await page.goto(`${origin}/race/${YEAR}/${MONACO_SLUG}/pace`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Sector Times", 20000);
+      await page.getByRole("combobox", { name: "Driver" }).first().click();
+      await page.getByRole("option", { name: "Carlos Sainz" }).click();
+      await sleep(400);
+      const afterSelect = page.url();
+      if (!afterSelect.includes("driver=55")) {
+        fail("8j. driver selection writes ?driver= to the URL", afterSelect);
+      } else {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        const reloadedOk = await waitText(page, "Carlos Sainz", 20000);
+        await sleep(300);
+        const reTrigger = await page.getByRole("combobox", { name: "Driver" }).first().innerText().catch(() => "");
+        if (reloadedOk && reTrigger.includes("Sainz")) {
+          pass("8j. selection → URL → reload reproduces the view");
+        } else fail("8j. selection → URL → reload reproduces the view", `trigger="${reTrigger}"`);
+      }
+
+      // 8k. UX-02 season: range click → URL → reload keeps the range
+      await page.goto(`${origin}/season/${YEAR}`, { waitUntil: "domcontentloaded" });
+      await waitText(page, "Verstappen", 20000);
+      await page.getByRole("button", { name: "Top 5", exact: true }).click();
+      await sleep(500); // debounced URL write
+      if (!page.url().includes("range=top5")) {
+        fail("8k. range click writes ?range= to the URL", page.url());
+      } else {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await waitText(page, "Verstappen", 20000);
+        await sleep(400);
+        const rc = await page.locator('[data-testid="champ-legend"] button').count();
+        if (rc === 5) pass("8k. range click → URL → reload keeps range=top5");
+        else fail("8k. range click → URL → reload keeps range=top5", `legend=${rc}`);
+      }
+
       await ctx.close();
     }
   } finally {

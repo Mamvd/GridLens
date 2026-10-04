@@ -2,9 +2,24 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   parseInterval, fmtInterval, computeStrategies, detailFields, fmtLapTime, fmtSectorTime,
+  driverLapsForSectors, TYRE_PILL_COLORS, widthBucketOf, fmtClock, gapSeries,
   type RaceBundle, type DetailPhase,
 } from "../../src/data/race";
+import { relativeLuminance } from "../../src/lib/chart-select";
 import type { Driver, Lap, Interval, Stint, PitEvent, SessionResult, Overtake, StartingGrid } from "../../src/api/openf1";
+
+// WCAG 2.x contrast for a #rrggbb pair (audit method: relativeLuminance).
+const contrast = (fg: string, bg: string): number => {
+  const rgb = (h: string): [number, number, number] => {
+    const n = parseInt(h.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const [r1, g1, b1] = rgb(fg);
+  const [r2, g2, b2] = rgb(bg);
+  const a = relativeLuminance(r1, g1, b1);
+  const b = relativeLuminance(r2, g2, b2);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+};
 
 const drv = (n: number, first: string, last: string): Driver =>
   ({
@@ -274,5 +289,340 @@ describe("pit duration semantics (stop_duration only)", () => {
     // node env, no jsdom — assert the source directly (regression on silent empty plot)
     const src = readFileSync(new URL("../../src/views/Race.tsx", import.meta.url), "utf8");
     expect(src).toMatch(/<BarChart data=\{overtakeRows[\s\S]{0,300}?layout="vertical"/);
+  });
+});
+
+// --- A3: tyre-pill label contrast (WCAG AA: ≥4.5:1 for 12px text) ---
+describe("tyre pill contrast (A3)", () => {
+  const rgb = (hex: string): [number, number, number] => {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const contrast = (fg: string, bg: string): number => {
+    const a = relativeLuminance(...rgb(fg));
+    const b = relativeLuminance(...rgb(bg));
+    const [hi, lo] = a > b ? [a, b] : [b, a];
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  it("SOFT / MEDIUM / HARD label pairs all clear 4.5:1", () => {
+    for (const c of ["SOFT", "MEDIUM", "HARD"] as const) {
+      const { bg, fg } = TYRE_PILL_COLORS[c];
+      expect(contrast(fg, bg), `${c}: ${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it("hues stay tyre-faithful (soft=red-ish, medium=yellow, hard=grey)", () => {
+    const [sr, sg, sb] = rgb(TYRE_PILL_COLORS.SOFT.bg);
+    expect(sr).toBeGreaterThan(sg); expect(sr).toBeGreaterThan(sb);
+    const [mr, mg, mb] = rgb(TYRE_PILL_COLORS.MEDIUM.bg);
+    expect(mb).toBeLessThan(mr); expect(mb).toBeLessThan(mg);
+    const [hr, hg, hb] = rgb(TYRE_PILL_COLORS.HARD.bg);
+    expect(Math.max(hr, hg, hb) - Math.min(hr, hg, hb)).toBeLessThan(20);
+    // labels are dark, not the light --foreground that measured 1.33:1
+    expect(relativeLuminance(...rgb(TYRE_PILL_COLORS.MEDIUM.fg))).toBeLessThan(0.05);
+  });
+});
+
+// --- PF-02: PaceTab must not rebuild its chart data every render ---
+describe("PaceTab sector derivation is reference-stable (PF-02)", () => {
+  it("identical (bundle, driver) → same array reference", () => {
+    const b = mkBundle();
+    const first = driverLapsForSectors(b, 1);
+    expect(driverLapsForSectors(b, 1)).toBe(first);
+    expect(first.map((l) => l.lap_number)).toEqual([2, 3]); // lap 1 (warm-up) skipped
+
+    const other = driverLapsForSectors(b, 16);
+    expect(other).not.toBe(first);
+    expect(driverLapsForSectors(b, 16)).toBe(other);
+  });
+
+  it("Race.tsx derives laps through useMemo on [bundle, refDriver]", () => {
+    // node env, no jsdom — assert the source (regression on inline rebuild → tween restart)
+    const src = readFileSync(new URL("../../src/views/Race.tsx", import.meta.url), "utf8");
+    expect(src).toMatch(
+      /useMemo\(\s*\(\)\s*=>\s*\(refDriver != null \? driverLapsForSectors\(bundle, refDriver\) : \[\]\),\s*\[bundle, refDriver\],\s*\)/,
+    );
+  });
+});
+
+// --- PF-07: resize state bucketing — only the 768px breakpoint matters ---
+describe("PF-07: resize width bucketing", () => {
+  it("buckets strictly at 768px", () => {
+    expect(widthBucketOf(0)).toBe("mobile");
+    expect(widthBucketOf(375)).toBe("mobile");
+    expect(widthBucketOf(767)).toBe("mobile");
+    expect(widthBucketOf(768)).toBe("desktop");
+    expect(widthBucketOf(2560)).toBe("desktop");
+  });
+
+  it("Race.tsx sets width state only on bucket change; chartHeight keys off the bucket", () => {
+    // node env, no jsdom — assert the source (regression on raw innerWidth state)
+    const src = readFileSync(new URL("../../src/views/Race.tsx", import.meta.url), "utf8");
+    expect(src).toMatch(/setWidthBucket\(\(prev\) => \(prev === bucket \? prev : bucket\)\)/);
+    expect(src).toMatch(/const chartHeight = widthBucket === "mobile" \? 260 : 320/);
+    expect(src).not.toMatch(/setWidth\(window\.innerWidth\)/);
+    expect(src).not.toMatch(/width < 768/);
+  });
+});
+
+// --- Group 3 regressions (node env, no jsdom → source asserts) ---
+const raceSrc = () => readFileSync(new URL("../../src/views/Race.tsx", import.meta.url), "utf8");
+
+// UX-05: the Lap area (~95 s) shared the sector Y-axis (25–45 s) → flat
+// sectors. Lap series must stay gone; auto domain tightens to the sectors.
+describe("UX-05: sector chart has no Lap area", () => {
+  const src = raceSrc();
+  it("no <Area dataKey=\"total\"> anywhere", () => {
+    expect(src).not.toMatch(/<Area dataKey="total"/);
+  });
+  it("srSummary describes sector-only lines", () => {
+    expect(src).toMatch(/srSummary="Line chart of sector 1, sector 2 and sector 3/);
+    expect(src).not.toMatch(/Area chart of total lap time/);
+  });
+  it("YAxis keeps domain=[auto,auto] (data-range, not 0-based default)", () => {
+    // Recharts defaults to a 0-based axis: without auto↔auto the 29–32 s
+    // sector deltas collapse against 0 again (regression: ticks 0s…32s).
+    const paceBlock = src.slice(src.indexOf('title="Sector Times"'), src.indexOf("---- Gaps"));
+    expect(paceBlock).toMatch(/domain=\{\["auto", "auto"\]\}/);
+  });
+});
+
+// UX-06: overtakes chart had two <Bar> series, hover-only — Legend matches siblings.
+describe("UX-06: overtakes chart has a Legend", () => {
+  it("<Legend> inside the Overtakes Made BarChart", () => {
+    const src = raceSrc();
+    const block = src.slice(src.indexOf('title="Overtakes Made"'));
+    const chartEnd = block.indexOf("</BarChart>");
+    expect(chartEnd).toBeGreaterThan(0);
+    expect(block.slice(0, chartEnd)).toMatch(/<Legend wrapperStyle=\{\{ fontSize: 11 \}\}/);
+  });
+});
+
+// UX-07: "Fastest lap 1:31.000" read as session-fastest — must name the driver.
+describe("UX-07: fastest-lap text names the selected driver", () => {
+  const src = raceSrc();
+  it("driver name precedes 'fastest lap'", () => {
+    expect(src).toMatch(/\{nameOfDriver\(refDriverName\)\} fastest lap \{fmtLapTime\(fastestLap\)\}/);
+  });
+  it("no bare 'Fastest lap {fmtLapTime…}' copy in Pace", () => {
+    expect(src).not.toMatch(/>Fastest lap \{fmtLapTime/);
+  });
+});
+
+// UX-08: dead "muted small" classes + one-sided sign copy — both signs defined,
+// Tailwind classes that actually exist in v4.
+describe("UX-08: gaps explainer copy + classes", () => {
+  const src = raceSrc();
+  it("dead classes gone, real Tailwind classes present", () => {
+    expect(src).not.toMatch(/className="muted small"/);
+    expect(src).toMatch(/className="text-xs text-muted-foreground"/);
+  });
+  it("copy defines both signs of the interval", () => {
+    expect(src).toMatch(/\+ = behind the car ahead/);
+    expect(src).toMatch(/− = ahead of it/);
+  });
+});
+
+// A1: sibling <label> has no htmlFor and the header label is hidden at 375px
+// → aria-label on each Select trigger.
+describe("A1: Select triggers expose accessible names", () => {
+  const src = raceSrc();
+  it("Driver (x2) + Compare driver triggers are labelled", () => {
+    expect(src.match(/aria-label="Driver"/g)).toHaveLength(2);
+    expect(src.match(/aria-label="Compare driver"/g)).toHaveLength(1);
+    expect(src).toMatch(/<SelectTrigger[^>]*aria-label="Driver"/);
+  });
+  it("header Season select is labelled in App.tsx", () => {
+    const app = readFileSync(new URL("../../src/App.tsx", import.meta.url), "utf8");
+    expect(app).toMatch(/<SelectTrigger[^>]*aria-label="Season"/);
+  });
+});
+
+// A2: chart data reachable for SR — ChartCard renders an opt-in sr-only table.
+describe("A2: sr-only chart tables", () => {
+  it("ChartCard accepts srTable and renders it sr-only", () => {
+    const card = readFileSync(new URL("../../src/components/charts/ChartCard.tsx", import.meta.url), "utf8");
+    expect(card).toMatch(/srTable\?: React\.ReactNode/);
+    expect(card).toMatch(/<Table className="sr-only" aria-label="Chart data table">/);
+    expect(card).toMatch(/\{srTable\}/);
+  });
+  it("Race charts opt in (pace, gaps, pit x2)", () => {
+    expect(raceSrc().match(/srTable=\{/g)).toHaveLength(4);
+  });
+  it("Season charts opt in (championship, constructors, strategies)", () => {
+    const season = readFileSync(new URL("../../src/views/Season.tsx", import.meta.url), "utf8");
+    expect(season.match(/srTable=\{/g)).toHaveLength(3);
+  });
+});
+
+// UX-02: Race driver/compare state persists in the query string.
+describe("UX-02: Race URL state wiring", () => {
+  const src = raceSrc();
+  it("initial state + meeting reset derive from URL params", () => {
+    expect(src).toMatch(/useSearchParams\(\)/);
+    expect(src).toMatch(/useState<number \| null>\(\(\) => parseDriverParam\(searchParams\.get\("driver"\)\)\)/);
+    expect(src).toMatch(/setRefDriver\(parseDriverParam\(searchParamsRef\.current\.get\("driver"\)\)\)/);
+  });
+  it("writes with replace; tab navigation carries the query", () => {
+    expect(src).toMatch(/setSearchParams\(next, \{ replace: true \}\)/);
+    expect(src).toMatch(/navigate\(search \? `\$\{to\}\?\$\{search\}` : to\)/);
+  });
+  it("invalid params fall back via parseDriverParam guards", () => {
+    expect(src).toMatch(/Number\.isInteger\(n\) && n > 0 \? n : null/);
+  });
+  it("App redirects preserve the query string", () => {
+    const app = readFileSync(new URL("../../src/App.tsx", import.meta.url), "utf8");
+    expect(app.match(/\/pace\$\{search\}/g)).toHaveLength(2);
+  });
+});
+
+// --- PF-12 / A5 / A7 / race first-paint regressions ---
+
+// PF-12: the Gaps spine used `new Date(x.date).toLocaleTimeString([], { hour12:
+// false })` per point — a locale formatter per sample, ~50 µs × 135 pts × 2
+// series ≈ 18 ms of sync work on every ref/rival change.
+describe("PF-12: Gaps x-axis clock", () => {
+  const isoSamples: string[] = [
+    "2024-05-26T00:00:00.000Z", "2024-05-26T00:00:09.000Z",
+    "2024-05-26T07:05:07.000Z", "2024-05-26T13:45:59.000Z",
+    "2024-05-26T23:59:59.000Z", "2024-12-31T12:30:00.000Z",
+    "2024-01-01T00:00:00.000Z", "2024-03-10T07:59:59.000Z",
+  ];
+  for (let h = 0; h < 24; h++) {
+    for (const m of [0, 5, 9, 59]) {
+      isoSamples.push(`2024-06-01T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:07.000Z`);
+    }
+  }
+
+  it("is byte-identical to toLocaleTimeString([], { hour12: false })", () => {
+    for (const iso of isoSamples) {
+      const ms = new Date(iso).getTime();
+      expect(fmtClock(ms)).toBe(new Date(iso).toLocaleTimeString([], { hour12: false }));
+    }
+  });
+
+  it("is fixed-width zero-padded HH:MM:SS", () => {
+    expect(fmtClock(new Date(2024, 0, 1, 7, 5, 9).getTime())).toBe("07:05:09");
+    expect(fmtClock(new Date(2024, 0, 1, 0, 0, 0).getTime())).toBe("00:00:00");
+  });
+
+  it("no locale formatting left on the Gaps path", () => {
+    const stripComments = (s: string) => s.replace(/^\s*\/\/.*$/gm, "");
+    const data = stripComments(readFileSync(new URL("../../src/data/race.ts", import.meta.url), "utf8"));
+    expect(data).not.toMatch(/toLocaleTimeString|toLocaleString/);
+    expect(stripComments(raceSrc())).not.toMatch(/toLocaleTimeString/);
+  });
+});
+
+describe("PF-12: gapSeries derivation bench", () => {
+  // realistic spine: 2 drivers × 200 laps, mixed time/lapped/leader/none rows
+  const intervals: Interval[] = Array.from({ length: 400 }, (_, i) => ({
+    session_key: 900,
+    driver_number: i % 2 === 0 ? 1 : 16,
+    date: new Date(Date.UTC(2024, 4, 26, 13, 0, 0) + i * 95_000).toISOString(),
+    interval: i % 17 === 0 ? "+1 LAP" : i % 23 === 0 ? "Leader" : i % 31 === 0 ? null : (i % 10) / 100,
+  })) as Interval[];
+
+  // the pre-PF-12 pipeline, verbatim minus the clock change — the comparison
+  // baseline for the numbers reported alongside this fix.
+  const legacySeries = (rows: Interval[], driver: number) => {
+    const raw = rows
+      .filter((i) => i.driver_number === driver)
+      .map((i) => ({ date: i.date, v: parseInterval(i.interval) }))
+      .filter((x) => x.v.type !== "none")
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const step = Math.max(1, Math.ceil(raw.length / 150));
+    return raw.filter((_, i) => i % step === 0).map((x) => ({
+      ms: new Date(x.date).getTime(),
+      t: new Date(x.date).toLocaleTimeString([], { hour12: false }),
+      gap: x.v.type === "time" ? x.v.seconds : null,
+      gapLabel: fmtInterval(x.v),
+      rivalGap: null as number | null,
+      rivalGapLabel: "",
+    }));
+  };
+
+  it("produces the same spine as the locale path (format parity on real rows)", () => {
+    expect(gapSeries(intervals, 1)).toEqual(legacySeries(intervals, 1));
+    expect(gapSeries(intervals, 16)).toEqual(legacySeries(intervals, 16));
+    expect(gapSeries(intervals, null)).toEqual([]);
+  });
+
+  it("whole pipeline (scan+parse+downsample+clock) stays under the 2 ms target", () => {
+    // audit before: 7.3–9.0 ms for the full derivation incl. locale formatting
+    const runs = 50;
+    const t0 = performance.now();
+    for (let i = 0; i < runs; i++) {
+      gapSeries(intervals, 1);
+      gapSeries(intervals, 16);
+    }
+    const perPair = (performance.now() - t0) / runs;
+    const t1 = performance.now();
+    for (let i = 0; i < runs; i++) {
+      legacySeries(intervals, 1);
+      legacySeries(intervals, 16);
+    }
+    const legacyPerPair = (performance.now() - t1) / runs;
+    // eslint-disable-next-line no-console
+    console.log(`PF-12 bench: gapSeries ${perPair.toFixed(3)}ms vs locale ${legacyPerPair.toFixed(3)}ms per ref+rival pair`);
+    expect(perPair).toBeLessThan(2);
+  });
+});
+
+// A5: audit reported the header year badge as white-on-red 4.38:1 at 12 px
+// bold. NOT REPRODUCIBLE — App.tsx renders variant="secondary"
+// (#e8e8ec on #1f1f23). The 4.38:1 pair is #ffffff on #ed1c24, i.e. the
+// badge's variant="default", which this app never uses. Guard both facts.
+describe("A5: header year badge contrast", () => {
+  const app = readFileSync(new URL("../../src/App.tsx", import.meta.url), "utf8");
+
+  it("year badge is variant=\"secondary\", never the white-on-red default", () => {
+    expect(app).toMatch(/<Badge variant="secondary"[^>]*>\{year \?\? DEFAULT_YEAR\}/);
+    expect(app).not.toMatch(/<Badge variant="default"/);
+  });
+
+  it("rendered pair clears 4.5:1; the reported pair is the unused default", () => {
+    expect(contrast("#e8e8ec", "#1f1f23")).toBeGreaterThanOrEqual(4.5);
+    expect(contrast("#e8e8ec", "#1f1f23")).toBeCloseTo(13.44, 1);
+    expect(contrast("#ffffff", "#ed1c24")).toBeCloseTo(4.38, 2); // the audit number
+  });
+});
+
+// A7: no skip link — first Tab landed on the header Season select.
+describe("A7: skip link", () => {
+  const app = readFileSync(new URL("../../src/App.tsx", import.meta.url), "utf8");
+
+  it("skip link is the first focusable element in the shell", () => {
+    const link = app.indexOf('href="#main"');
+    expect(link).toBeGreaterThan(0);
+    expect(link).toBeLessThan(app.indexOf("<h1"));
+    expect(link).toBeLessThan(app.indexOf("<Select"));
+  });
+
+  it("targets #main, and <main id=\"main\"> can actually take focus", () => {
+    expect(app).toMatch(/sr-only focus:not-sr-only/);
+    expect(app).toMatch(/<main id="main" tabIndex=\{-1\}/);
+  });
+});
+
+// Race first paint: the base-load branch early-returned a bare skeleton, so the
+// meeting card + tabs waited on a fetch they don't need, and ChartCard's title
+// rendered "Loading…" as a real <h3>.
+describe("Race first paint: chrome before data", () => {
+  const src = raceSrc();
+
+  it("no bare skeleton early-return above the chrome", () => {
+    expect(src).not.toMatch(/if \(!bundle && !fullError\) return <LoadSkeleton/);
+    expect(src).toMatch(/const basePending = !bundle && !fullError/);
+  });
+
+  it("skeleton renders inside each tab's content area", () => {
+    expect(src).toMatch(/<TabsContent key=\{t\.id\} value=\{t\.id\}>\s*<LoadSkeleton chartHeight=\{chartHeight\} \/>/);
+  });
+
+  it("skeleton has no ChartCard heading", () => {
+    expect(src).not.toMatch(/title="Loading…"/);
+    expect(src).toMatch(/const LoadSkeleton/);
   });
 });

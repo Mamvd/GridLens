@@ -1,9 +1,15 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   cached, cacheKey, getCachePolicy, classifySeason,
   CURRENT_SEASON_TTL_MS, LIVE_DATA_ENABLED, __resetCacheForTests,
 } from "../../src/api/cache";
+import { loadRaceBase } from "../../src/data/race";
 import { lsStore, lsReset } from "./setup";
+
+// NF-01/NF-02 exercise loadRaceBase against a mocked network — the rest of
+// this file drives `cached` with local fetchers, so the mock is inert there.
+const { getOpenF1Mock } = vi.hoisted(() => ({ getOpenF1Mock: vi.fn() }));
+vi.mock("../../src/api/openf1", () => ({ getOpenF1: getOpenF1Mock }));
 
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 const completed = getCachePolicy(2023, "completed");
@@ -69,6 +75,39 @@ describe("cached: basic policies", () => {
     expect(classifySeason(2023)).toBe("completed");
     expect(classifySeason(new Date().getFullYear())).toBe("in-progress");
     expect(classifySeason(new Date().getFullYear(), true)).toBe("live");
+  });
+});
+
+describe("cached: per-resource localStorage budget (PF-04)", () => {
+  it("laps (~564 KB) is allowed under raised per-entry cap", async () => {
+    const ops = { session_key: 42 };
+    // Return a large array simulating ~564 KB of lap data (~3800 laps with full precision)
+    const largeLapsData = Array(3800).fill(null).map((_, i) => ({
+      session_key: 42, driver_number: 1, lap_number: i + 1,
+      lap_duration: 90.123, duration_sector_1: 30.123, duration_sector_2: 31.234, duration_sector_3: 28.789
+    }));
+    let count = 0;
+    const countingFn = async () => { count++; return largeLapsData; };
+    const r = await cached("laps", ops, countingFn, inProgress);
+    expect(count).toBe(1);
+    expect(r.stale).toBe(false);
+    // Verify it was written to LS (key exists)
+    const key = cacheKey("laps", ops);
+    expect(lsStore.has(key)).toBe(true);
+    const stored = JSON.parse(lsStore.get(key)!);
+    expect(stored.d.length).toBe(3800);
+  });
+
+  it("intervals (~4 MB) stays memory-only regardless of cap", async () => {
+    const ops = { session_key: 42 };
+    const { fn, count } = mkFn("intervals-budget");
+    const r = await cached("intervals", ops, fn, completed);
+    expect(count()).toBe(1);
+    // Must NOT be in localStorage
+    const key = cacheKey("intervals", ops);
+    expect(lsStore.has(key)).toBe(false);
+    // But must be in memory
+    expect(r.data).toBeDefined();
   });
 });
 
@@ -269,5 +308,100 @@ describe("cached: signal join / re-issue", () => {
     await expect(pOwner).rejects.toMatchObject({ name: "AbortError" });
     await expect(pJoiner).rejects.toThrow("network down");
     expect(calls).toBe(2);
+  });
+});
+
+// NF-01: season batches rows under {session_key:[...all]}; race reads
+// single-key. A fresh batch entry must serve the single-key read with zero
+// request starts (Season→Race), while cold direct-to-race still fetches.
+describe("NF-01: batch key serves race single-key reads", () => {
+  const resultRow = (sk: number) => ({ session_key: sk, position: 1 });
+  const driverRow = (sk: number) => ({ session_key: sk, first_name: "Max", last_name: "Verstappen" });
+
+  beforeEach(() => { getOpenF1Mock.mockReset(); });
+
+  it("fresh season batch → loadRaceBase filters rows, 0 getOpenF1 calls", async () => {
+    await cached("session_result", { session_key: [900, 901] },
+      async () => [resultRow(900), resultRow(901)] as never, completed);
+    await cached("drivers", { session_key: [900, 901] },
+      async () => [driverRow(900), driverRow(901)] as never, completed);
+    getOpenF1Mock.mockRejectedValue(new Error("must not fetch"));
+    const b = await loadRaceBase(900, 2023);
+    expect(getOpenF1Mock).not.toHaveBeenCalled();
+    expect(b.results).toHaveLength(1);
+    expect(b.results![0].session_key).toBe(900); // sibling session filtered out
+    expect(b.drivers![0].first_name).toBe("Max");
+    expect(b.stale).toBe(false);
+    expect(b.resultsError).toBeUndefined();
+    expect(b.driversError).toBeUndefined();
+  });
+
+  it("no batch entry → cold direct-to-race fetches single-key as before", async () => {
+    getOpenF1Mock.mockImplementation(async (resource: string) =>
+      resource === "session_result" ? [resultRow(900)] : [driverRow(900)]);
+    const b = await loadRaceBase(900, 2023);
+    expect(getOpenF1Mock).toHaveBeenCalledTimes(2);
+    expect(b.results).toHaveLength(1);
+    expect(b.drivers).toHaveLength(1);
+  });
+
+  it("batch entry under a different resource never leaks across", async () => {
+    await cached("drivers", { session_key: [900] },
+      async () => [driverRow(900)] as never, completed);
+    getOpenF1Mock.mockImplementation(async (resource: string) =>
+      resource === "session_result" ? [resultRow(900)] : [driverRow(900)]);
+    const b = await loadRaceBase(900, 2023);
+    // session_result had no batch + no single entry → fetched; drivers hit batch
+    expect(getOpenF1Mock).toHaveBeenCalledTimes(1);
+    expect(getOpenF1Mock.mock.calls[0][0]).toBe("session_result");
+    expect(b.results).toHaveLength(1);
+    expect(b.drivers).toHaveLength(1);
+  });
+});
+
+// NF-02: one Promise.all member rejecting must fail only its own slice —
+// the sibling's data survives (error titles never blame the healthy one).
+describe("NF-02: loadRaceBase settles per resource", () => {
+  const resultRow = (sk: number) => ({ session_key: sk, position: 1 });
+  const driverRow = (sk: number) => ({ session_key: sk, first_name: "Max", last_name: "Verstappen" });
+
+  beforeEach(() => { getOpenF1Mock.mockReset(); });
+
+  it("session_result rejects → drivers keeps its data", async () => {
+    getOpenF1Mock.mockImplementation(async (resource: string) => {
+      if (resource === "session_result") throw new Error("result boom");
+      return [driverRow(900)];
+    });
+    const b = await loadRaceBase(900, 2023);
+    expect(b.results).toBeUndefined();
+    expect(b.resultsError).toContain("result boom");
+    expect(b.drivers).toHaveLength(1);
+    expect(b.driversError).toBeUndefined();
+  });
+
+  it("drivers rejects → results keeps its data", async () => {
+    getOpenF1Mock.mockImplementation(async (resource: string) => {
+      if (resource === "drivers") throw new Error("drivers boom");
+      return [resultRow(900)];
+    });
+    const b = await loadRaceBase(900, 2023);
+    expect(b.drivers).toBeUndefined();
+    expect(b.driversError).toContain("drivers boom");
+    expect(b.results).toHaveLength(1);
+    expect(b.resultsError).toBeUndefined();
+  });
+
+  it("both reject → both errors reported, no throw", async () => {
+    getOpenF1Mock.mockRejectedValue(new Error("total failure"));
+    const b = await loadRaceBase(900, 2023);
+    expect(b.resultsError).toContain("total failure");
+    expect(b.driversError).toContain("total failure");
+    expect(b.results).toBeUndefined();
+    expect(b.drivers).toBeUndefined();
+  });
+
+  it("AbortError still rethrows (aborted nav is not a slice error)", async () => {
+    getOpenF1Mock.mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    await expect(loadRaceBase(900, 2023)).rejects.toMatchObject({ name: "AbortError" });
   });
 });

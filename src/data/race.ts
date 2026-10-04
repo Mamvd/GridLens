@@ -3,7 +3,7 @@ import {
   type Driver, type Lap, type Interval, type Stint, type PitEvent,
   type SessionResult, type Overtake, type StartingGrid,
 } from "../api/openf1";
-import { cached, classifySeason, getCachePolicy, LIVE_DATA_ENABLED } from "../api/cache";
+import { cached, classifySeason, getCachePolicy, LIVE_DATA_ENABLED, peekCached, peekCachedBatch } from "../api/cache";
 
 // ponytail: API has no display-name field — compose first+last; keep one helper,
 // add shared formatter in lib/ if a third call site needs styling.
@@ -31,6 +31,13 @@ export interface RaceBundle {
 export const raceIsUnrun = (m: { date_start: string }, nowMs: number = Date.now()): boolean =>
   new Date(m.date_start).getTime() > nowMs;
 
+// PF-07: chart heights only change at the 768px breakpoint — bucket widths so
+// sub-boundary resize events cause zero state updates / re-renders.
+// (Boundary: <768 mobile, ≥768 desktop; same edge as Tailwind's `md`.)
+export type WidthBucket = "mobile" | "desktop";
+export const widthBucketOf = (width: number): WidthBucket =>
+  width < 768 ? "mobile" : "desktop";
+
 // ponytail: default in-progress when year omitted — short TTL is the safe
 // default for unknown recency. Upgrade path = pass the actual session
 // date_end from the session rows already in memory to detect live precisely.
@@ -40,23 +47,65 @@ const racePolicy = (year?: number, live?: boolean) => {
   return getCachePolicy(year ?? new Date().getFullYear(), status);
 };
 
-// one cached() call per resource — revisit-hits the two-tier cache (intervals
-// stays memory-only via the 500 KB localStorage gate in api/cache.ts)
-const raceRes = <T>(resource: string, sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) =>
-  cached<T>(resource, { session_key: sessionKey },
+// one read per resource. NF-01: single-key entry first (peek — no fetch, no
+// stale-entry eviction, so cached()'s stale-if-error rescue still works), then
+// a fresh season BATCH entry containing this session_key (rows filtered
+// in-memory) — Season→Race then costs 0 request starts for rows season
+// already owns. Batch miss falls through to the normal single-key cached()
+// fetch, so cold direct-to-race behaves exactly as before (abort/signal/
+// stale-if-error all live in that cached() call). ponytail: upgrade =
+// query-side join / key aliases in the cache layer, dropping this bridge.
+const raceRes = async <T extends { session_key: number }>(
+  resource: string, sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal },
+): Promise<{ data: T[]; stale: boolean }> => {
+  const policy = racePolicy(year, live);
+  if (policy.persist) {
+    const single = peekCached<T>(resource, { session_key: sessionKey }, policy.ttlMs);
+    if (single) return { data: single, stale: false };
+    // batch alias only makes sense on persisted tiers; live always refetches
+    const batch = peekCachedBatch<T>(resource, sessionKey, policy.ttlMs);
+    // ponytail: a batch containing this key but zero rows (empty/future
+    // session) is served as [] — a single-key fetch would 404 anyway.
+    if (batch) return { data: batch.filter((r) => r.session_key === sessionKey), stale: false };
+  }
+  return cached<T>(resource, { session_key: sessionKey },
     (signal) => getOpenF1<T>(resource, { session_key: sessionKey }, { signal }),
-    racePolicy(year, live), opts);
+    policy, opts);
+};
+
+// NF-02: settle each slice independently — one rejection must not fail the
+// sibling that resolved (its rows stay usable; only the failed slice gets an
+// error). AbortError still rethrows (aborted nav must not become a slice
+// error, or a year-swap would paint an error card for the new race).
+export interface RaceBase {
+  results?: SessionResult[];
+  resultsError?: string;
+  drivers?: Driver[];
+  driversError?: string;
+  stale: boolean;
+}
 
 // always-needed resources (page shell: header, computeStrategies base)
-export const loadRaceBase = async (sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal }) => {
-  const [resultsRes, driversRes] = await Promise.all([
-    raceRes<SessionResult>("session_result", sessionKey, year, live, opts),
-    raceRes<Driver>("drivers", sessionKey, year, live, opts),
+export const loadRaceBase = async (
+  sessionKey: number, year?: number, live?: boolean, opts?: { signal?: AbortSignal },
+): Promise<RaceBase> => {
+  const settle = <T,>(
+    p: Promise<{ data: T[]; stale: boolean }>,
+  ): Promise<{ ok: { data: T[]; stale: boolean } } | { err: unknown }> =>
+    p.then((v) => ({ ok: v }), (err: unknown) => ({ err }));
+  const [results, drivers] = await Promise.all([
+    settle(raceRes<SessionResult>("session_result", sessionKey, year, live, opts)),
+    settle(raceRes<Driver>("drivers", sessionKey, year, live, opts)),
   ]);
+  for (const s of [results, drivers]) {
+    if ("err" in s && (s.err as Error)?.name === "AbortError") throw s.err;
+  }
   return {
-    results: resultsRes.data,
-    drivers: driversRes.data,
-    stale: resultsRes.stale || driversRes.stale,
+    results: "ok" in results ? results.ok.data : undefined,
+    resultsError: "err" in results ? String(results.err) : undefined,
+    drivers: "ok" in drivers ? drivers.ok.data : undefined,
+    driversError: "err" in drivers ? String(drivers.err) : undefined,
+    stale: ("ok" in results && results.ok.stale) || ("ok" in drivers && drivers.ok.stale),
   };
 };
 
@@ -111,6 +160,18 @@ export interface DriverStrategy {
   gridPosition: number | null;
 }
 
+// A3: tyre-pill label pairs for the strategy rows. 12px text needs ≥4.5:1,
+// and the chart fills are far too bright for the light --foreground label —
+// so labels are near-black on all three. SOFT is lifted a hair off
+// --chart-1 (#ed1c24) because it lands at 4.27:1 against #121214; MEDIUM and
+// HARD keep their exact --chart-2/--chart-3 values. Hues stay tyre-faithful
+// (red / yellow / grey). Contrast asserted in test/unit/race-analytics.test.ts.
+export const TYRE_PILL_COLORS = {
+  SOFT: { bg: "#f4343c", fg: "#121214" },
+  MEDIUM: { bg: "#f5c518", fg: "#121214" },
+  HARD: { bg: "#8a8a93", fg: "#121214" },
+} as const;
+
 export const computeStrategies = (b: RaceBundle): DriverStrategy[] =>
   b.results
     .filter((r) => r.driver_number)
@@ -160,7 +221,7 @@ export const computeStrategies = (b: RaceBundle): DriverStrategy[] =>
     .sort((a, b) => (a.finishPosition ?? 99) - (b.finishPosition ?? 99));
 
 // Sector-trace: driver lap-by-lap sector times (skip warm-up lap 1).
-export const driverLapsForSectors = (b: RaceBundle, driverNumber: number) =>
+const computeSectorLaps = (b: RaceBundle, driverNumber: number) =>
   b.laps
     .filter((l) => l.driver_number === driverNumber && l.lap_number > 1)
     .map((l) => ({
@@ -171,6 +232,23 @@ export const driverLapsForSectors = (b: RaceBundle, driverNumber: number) =>
       total: l.lap_duration,
     }))
     .sort((a, c) => a.lap_number - c.lap_number);
+
+type SectorLaps = ReturnType<typeof computeSectorLaps>;
+
+// PF-02: identical (bundle, driver) must hand back the SAME array reference —
+// a fresh array on every parent re-render restarts Recharts' 1500ms tweens.
+// ponytail: 1-slot identity cache (bundle comes from useState, driver from
+// useState, so both are referentially stable in practice); upgrade to a
+// WeakMap keyed on bundle if a second consumer alternates bundles per frame.
+let sectorKey: readonly [RaceBundle, number] | null = null;
+let sectorVal: SectorLaps = [];
+
+export const driverLapsForSectors = (b: RaceBundle, driverNumber: number): SectorLaps => {
+  if (sectorKey && sectorKey[0] === b && sectorKey[1] === driverNumber) return sectorVal;
+  sectorVal = computeSectorLaps(b, driverNumber);
+  sectorKey = [b, driverNumber];
+  return sectorVal;
+};
 
 export const fmtLapTime = (secs: number | null | undefined): string => {
   if (secs == null || !isFinite(secs)) return "—";
@@ -265,4 +343,46 @@ export const fmtInterval = (v: IntervalValue): string => {
     case "leader": return "Leader";
     case "none": return "—";
   }
+};
+
+// PF-12: Gaps x-axis clock. `new Date(iso).toLocaleTimeString([], { hour12:
+// false })` builds a locale formatter per point (~50 µs × 135 points × 2
+// series ≈ 18 ms of sync work on every driver/rival change). Fixed-width
+// HH:MM:SS padding is byte-identical to that call's output on the default
+// locale and costs ~1 µs. Verify parity in test/unit/race-analytics.test.ts.
+export const fmtClock = (ms: number): string => {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+
+export type GapPoint = {
+  ms: number; t: string;
+  gap: number | null; gapLabel: string;
+  rivalGap: number | null; rivalGapLabel: string;
+};
+
+// PF-12: one driver's interval spine — filter, parse, sort, downsample to
+// 150 points, clock each point. Pure and React-free so the perf bench times
+// the real pipeline; Race.tsx memoizes it on the intervals data ref + driver.
+export const gapSeries = (intervals: readonly Interval[], driver: number | null): GapPoint[] => {
+  if (driver == null) return [];
+  const raw = intervals
+    .filter((i) => i.driver_number === driver)
+    .map((i) => ({ date: i.date, v: parseInterval(i.interval) }))
+    // drop only "none" — lapped/leader stay in the spine as line gaps
+    .filter((x) => x.v.type !== "none")
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const step = Math.max(1, Math.ceil(raw.length / 150));
+  return raw.filter((_, i) => i % step === 0).map((x) => {
+    const ms = new Date(x.date).getTime();
+    return {
+      ms,
+      t: fmtClock(ms),
+      gap: x.v.type === "time" ? x.v.seconds : null, // lapped/leader → null → line gap
+      gapLabel: fmtInterval(x.v),
+      rivalGap: null,
+      rivalGapLabel: "",
+    };
+  });
 };

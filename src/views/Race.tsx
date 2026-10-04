@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, Legend,
-  BarChart, Bar, CartesianGrid, ComposedChart, Area,
+  BarChart, Bar, CartesianGrid, ComposedChart,
 } from "recharts";
 import {
-  computeStrategies, driverLapsForSectors, fmtLapTime,
-  nameOfDriver, raceIsUnrun, parseInterval, fmtInterval,
+  computeStrategies, driverLapsForSectors, fmtLapTime, TYRE_PILL_COLORS,
+  nameOfDriver, raceIsUnrun, parseInterval, fmtInterval, gapSeries,
   loadRaceBase, loadLaps, loadIntervals, loadStints, loadPit, loadOvertakes, loadGrid,
-  missingResources, TAB_RESOURCES, DETAIL_RESOURCES, detailFields,
-  type RaceBundle, type RaceResKey, type DetailPhase,
+  missingResources, TAB_RESOURCES, DETAIL_RESOURCES, detailFields, widthBucketOf,
+  type RaceBundle, type RaceResKey, type DetailPhase, type WidthBucket, type GapPoint,
 } from "../data/race";
 import type {
   Meeting, Driver, Lap, Interval, Stint, PitEvent, SessionResult, Overtake, StartingGrid,
@@ -17,16 +17,20 @@ import type {
 import { seasonRaceSessions } from "../data/season";
 import { formatRaceDateRange } from "../lib/dates";
 import { resourcePhase } from "../lib/resource-state";
+import { legendInk } from "../lib/chart-select";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ChartCard } from "@/components/charts/ChartCard";
+import { ChartCard, buildSrTable } from "@/components/charts/ChartCard";
 import { chartTooltip } from "@/components/charts/ChartCard";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 
 type Tab = "pace" | "gaps" | "strategy" | "pit";
+// PF-12: stable identity for "intervals not loaded yet" — `?? []` inline would
+// hand every bundle rebuild a fresh array and defeat data-ref memo keys.
+const NO_INTERVALS: Interval[] = [];
 const TABS: { id: Tab; label: string }[] = [
   { id: "pace", label: "Pace" },
   { id: "gaps", label: "Gaps" },
@@ -48,8 +52,10 @@ const emptyRes = (): ResState => ({
   grid: { loading: false },
 });
 
+// Plain bars, not ChartCard: its title renders an <h3>, and "Loading…" as a
+// heading reads like real content to screen readers and the outline alike.
 const LoadSkeleton = ({ chartHeight }: { chartHeight: number }) => (
-  <div className="space-y-6">
+  <div className="space-y-6" role="status" aria-label="Loading race data">
     <Card>
       <CardContent className="space-y-3 p-6">
         <Skeleton className="h-4 w-48" />
@@ -57,10 +63,21 @@ const LoadSkeleton = ({ chartHeight }: { chartHeight: number }) => (
         <Skeleton className="h-9 w-full max-w-[360px]" />
       </CardContent>
     </Card>
-    <ChartCard title="Loading…" height={chartHeight}>
-      <div className="flex h-full items-center justify-center" />
-    </ChartCard>
+    <Card>
+      <CardContent className="pt-6">
+        <Skeleton className="mb-4 h-4 w-40" />
+        <Skeleton className="w-full" style={{ height: chartHeight }} />
+      </CardContent>
+    </Card>
   </div>
+);
+
+// A4: Recharts sets legend TEXT colour to the series stroke, so the brand red
+// (#ed1c24 on --card #121214 = 4.27:1) fails the 4.5:1 floor at 11 px. The
+// formatter wraps only the text in a legible tint; the swatch/icon keeps the
+// brand hue, so the legend still reads as the same red series.
+const legendText: NonNullable<ComponentProps<typeof Legend>["formatter"]> = (value, entry) => (
+  <span style={{ color: legendInk(String(entry.color ?? "")) }}>{value}</span>
 );
 
 const RES_LABEL: Partial<Record<RaceResKey, string>> = {
@@ -113,17 +130,30 @@ interface Props {
   meeting: Meeting;
 }
 
+// UX-02: URL → driver number; invalid (abc, 0, -3, 1.5) → null → defaults.
+const parseDriverParam = (v: string | null): number | null => {
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+};
+
 export const Race = ({ meeting }: Props) => {
   const navigate = useNavigate();
   const { year = "", slug = "", tab: tabParam = "pace" } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const tab = tabParam as Tab; // App RaceRoute validated it ∈ TABS
   const [res, setRes] = useState<ResState>(emptyRes);
   const [sess, setSess] = useState<{ sk: number; meetingKey: number; gmtOffset?: string } | null>(null);
   const [error, setError] = useState("");
   const [sessionsStale, setSessionsStale] = useState(false);
-  const [refDriver, setRefDriver] = useState<number | null>(null);
-  const [rivalDriver, setRivalDriver] = useState<number | null>(null);
-  const [width, setWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 0);
+  // UX-02: derive initial driver state from URL params (once, at mount)
+  const [refDriver, setRefDriver] = useState<number | null>(() => parseDriverParam(searchParams.get("driver")));
+  const [rivalDriver, setRivalDriver] = useState<number | null>(() => parseDriverParam(searchParams.get("compare")));
+  // PF-07: only the 768px bucket matters (chart heights) — raw width state
+  // re-rendered Race + active tab on every resize event.
+  const [widthBucket, setWidthBucket] = useState<WidthBucket>(
+    typeof window !== "undefined" ? widthBucketOf(window.innerWidth) : "desktop",
+  );
   const [reloadKey, setReloadKey] = useState(0);
   // gen guards slice writes: a newer meeting/reload invalidates older responses
   const genRef = useRef(0);
@@ -137,8 +167,31 @@ export const Race = ({ meeting }: Props) => {
   // in-flight slices of a meeting all die on meeting change / unmount.
   const abortRef = useRef<AbortController | null>(null);
 
+  // UX-02: sync driver selections to URL (replace, not push); skip the
+  // navigate entirely when params already match (clean mount = no history op).
   useEffect(() => {
-    const handleResize = () => setWidth(window.innerWidth);
+    const next = new URLSearchParams(searchParams);
+    if (refDriver != null) next.set("driver", String(refDriver));
+    else next.delete("driver");
+    if (rivalDriver != null) next.set("compare", String(rivalDriver));
+    else next.delete("compare");
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [refDriver, rivalDriver, searchParams, setSearchParams]);
+
+  // latest params for the meeting-reset effect below — read through a ref so
+  // the reset effect's deps stay [meeting, reloadKey, startLoad] (re-running
+  // the full session fetch on every param write would thrash the API).
+  const searchParamsRef = useRef(searchParams);
+  useEffect(() => { searchParamsRef.current = searchParams; }, [searchParams]);
+
+  useEffect(() => {
+    // set only on bucket change — same-bucket resizes are state no-ops
+    const handleResize = () => {
+      const bucket = widthBucketOf(window.innerWidth);
+      setWidthBucket((prev) => (prev === bucket ? prev : bucket));
+    };
     window.addEventListener("resize", handleResize);
     handleResize();
     return () => window.removeEventListener("resize", handleResize);
@@ -164,16 +217,36 @@ export const Race = ({ meeting }: Props) => {
       loadRaceBase(sk, meeting.year, undefined, opts).then(
         (b) => {
           if (gen !== genRef.current) return;
-          patch("drivers", { data: b.drivers, loading: false, stale: b.stale });
-          patch("results", { data: b.results, loading: false, stale: b.stale });
-          const sorted = [...b.results].filter((r) => r.driver_number)
+          // NF-02: patch only the slice that failed — a healthy sibling keeps
+          // its data instead of being branded with the other's error.
+          if (b.drivers !== undefined) patch("drivers", { data: b.drivers, loading: false, stale: b.stale });
+          else patch("drivers", { loading: false, error: b.driversError ?? "drivers failed" });
+          if (b.results !== undefined) patch("results", { data: b.results, loading: false, stale: b.stale });
+          else patch("results", { loading: false, error: b.resultsError ?? "results failed" });
+          if (b.results === undefined || b.drivers === undefined) return;
+          // capture: property narrowing doesn't survive the known() closure below
+          const results = b.results;
+          const sorted = [...results].filter((r) => r.driver_number)
             .sort((a, b2) => (a.position ?? Infinity) - (b2.position ?? Infinity));
           if (sorted.length >= 2) {
-            setRefDriver(sorted[0].driver_number);
-            setRivalDriver(sorted[1].driver_number);
+            // UX-02: URL driver wins when it exists in this session; missing/
+            // invalid → P1/P2 defaults. State can't have diverged from the URL
+            // yet (the selects only mount with the bundle, patched same batch).
+            const known = (n: number | null) =>
+              n != null && results.some((r) => r.driver_number === n);
+            const urlRef = parseDriverParam(searchParamsRef.current.get("driver"));
+            const urlRival = parseDriverParam(searchParamsRef.current.get("compare"));
+            const ref = known(urlRef) ? urlRef! : sorted[0].driver_number;
+            const rival = known(urlRival) && urlRival !== ref
+              ? urlRival!
+              : (sorted.find((r) => r.driver_number !== ref)?.driver_number ?? sorted[1].driver_number);
+            setRefDriver(ref);
+            setRivalDriver(rival);
           }
         },
         (e) => {
+          // only AbortError / unexpected throws reject — per-slice failures
+          // resolve above with their own error slot
           if (gen !== genRef.current || (e as Error)?.name === "AbortError") return;
           patch("drivers", { loading: false, error: String(e) });
           patch("results", { loading: false, error: String(e) });
@@ -214,8 +287,10 @@ export const Race = ({ meeting }: Props) => {
     setSess(null);
     setError("");
     setSessionsStale(false);
-    setRefDriver(null);
-    setRivalDriver(null);
+    // UX-02: re-derive from the current URL (deep link → its driver, not null;
+    // calendar navigation → no params → null → base-load defaults below)
+    setRefDriver(parseDriverParam(searchParamsRef.current.get("driver")));
+    setRivalDriver(parseDriverParam(searchParamsRef.current.get("compare")));
     let alive = true;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -261,7 +336,7 @@ export const Race = ({ meeting }: Props) => {
       drivers,
       results,
       laps: (res.laps.data as Lap[] | undefined) ?? [],
-      intervals: (res.intervals.data as Interval[] | undefined) ?? [],
+      intervals: (res.intervals.data as Interval[] | undefined) ?? NO_INTERVALS,
       stints: (res.stints.data as Stint[] | undefined) ?? [],
       pitEvents: (res.pit.data as PitEvent[] | undefined) ?? [],
       overtakes: (res.overtakes.data as Overtake[] | undefined) ?? [],
@@ -308,32 +383,35 @@ export const Race = ({ meeting }: Props) => {
 
   const baseError = res.drivers.error ?? res.results.error;
   const fullError = error || (baseError ? String(baseError) : "");
-  if (fullError) {
-    return (
-      <Card className="border-destructive/50 bg-destructive/10">
-        <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
-          <p className="text-[13px] text-destructive" title={fullError}>Failed to load {meeting.meeting_name}.</p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              if (error) { setError(""); setReloadKey((k) => k + 1); }
-              else if (sess) startLoad(genRef.current, sess.sk, "base");
-            }}
-          >
-            Retry
-          </Button>
-        </CardContent>
-      </Card>
-    );
-  }
-  const chartHeight = width < 768 ? 260 : 320;
+  const chartHeight = widthBucket === "mobile" ? 260 : 320;
 
-  if (!bundle) return <LoadSkeleton chartHeight={chartHeight} />;
+  // UX-04: base failure keeps the chrome — meeting card + tabs stay mounted
+  // and the error card renders in the content area (same visual as TabGate's).
+  // First paint does too: meeting + session live in props/state, so the header
+  // and tabs render immediately and only the content area waits (PF/UX P3).
+  const basePending = !bundle && !fullError;
+
+  const baseErrorCard = (
+    <Card className="border-destructive/50 bg-destructive/10 mb-4">
+      <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+        <p className="text-[13px] text-destructive" title={fullError}>Failed to load {meeting.meeting_name}.</p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            if (error) { setError(""); setReloadKey((k) => k + 1); }
+            else if (sess) startLoad(genRef.current, sess.sk, "base");
+          }}
+        >
+          Retry
+        </Button>
+      </CardContent>
+    </Card>
+  );
 
   return (
     <div className="race">
-      {bundle.stale && (
+      {bundle?.stale && (
         <div className="mb-4 rounded-md border bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
           Data may be out of date (latest revalidation failed).
         </div>
@@ -350,13 +428,18 @@ export const Race = ({ meeting }: Props) => {
         </div>
       </Card>
 
+      {fullError && baseErrorCard}
+
       <Tabs value={tab} onValueChange={(val) => {
         const to = `/race/${year}/${slug}/${val}`;
         // two-fire dedupe: same target within 100 ms = the second Radix fire
         const now = Date.now();
         if (lastTabNavRef.current.to === to && now - lastTabNavRef.current.at < 100) return;
         lastTabNavRef.current = { to, at: now };
-        navigate(to);
+        // UX-02: carry ?driver=&compare= across tab changes — the tab is the
+        // path segment, selections live in the query string.
+        const search = searchParams.toString();
+        navigate(search ? `${to}?${search}` : to);
       }} className="w-full">
         <TabsList className="grid w-full grid-cols-4 bg-muted">
           {TABS.map((t) => (
@@ -365,51 +448,63 @@ export const Race = ({ meeting }: Props) => {
             </TabsTrigger>
           ))}
         </TabsList>
-        <TabsContent value="pace">
-          <TabGate
-            tab="pace" res={res} chartHeight={chartHeight} onRetry={retryKeys}
-            rowCount={bundle.laps.length} emptyMessage="No lap data available for this race."
-          >
-            <PaceTab
-              bundle={bundle}
-              strategies={strategies}
-              refDriver={refDriver}
-              setRefDriver={setRefDriver}
-              chartHeight={chartHeight}
-            />
-          </TabGate>
-        </TabsContent>
-        <TabsContent value="gaps">
-          <TabGate
-            tab="gaps" res={res} chartHeight={chartHeight} onRetry={retryKeys}
-            rowCount={bundle.intervals.length} emptyMessage="No gap data available for this race."
-          >
-            <GapsTab
-              bundle={bundle}
-              refDriver={refDriver}
-              rivalDriver={rivalDriver}
-              setRefDriver={setRefDriver}
-              setRivalDriver={setRivalDriver}
-              chartHeight={chartHeight}
-            />
-          </TabGate>
-        </TabsContent>
-        <TabsContent value="strategy">
-          <TabGate
-            tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}
-            rowCount={strategies.length} emptyMessage="No strategy data available for this race."
-          >
-            <StrategyTab strategies={strategies} res={res} onExpand={ensureDetail} onRetryDetail={ensureDetail} />
-          </TabGate>
-        </TabsContent>
-        <TabsContent value="pit">
-          <TabGate
-            tab="pit" res={res} chartHeight={chartHeight} onRetry={retryKeys}
-            rowCount={strategies.length} emptyMessage="No pit stop data available for this race."
-          >
-            <PitTab strategies={strategies} />
-          </TabGate>
-        </TabsContent>
+        {/* base still resolving: chrome is already painted, only the content
+            area waits — one skeleton for whichever tab is active */}
+        {basePending &&
+          TABS.map((t) => (
+            <TabsContent key={t.id} value={t.id}>
+              <LoadSkeleton chartHeight={chartHeight} />
+            </TabsContent>
+          ))}
+        {bundle && (
+          <>
+            <TabsContent value="pace">
+              <TabGate
+                tab="pace" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+                rowCount={bundle.laps.length} emptyMessage="No lap data available for this race."
+              >
+                <PaceTab
+                  bundle={bundle}
+                  strategies={strategies}
+                  refDriver={refDriver}
+                  setRefDriver={setRefDriver}
+                  chartHeight={chartHeight}
+                />
+              </TabGate>
+            </TabsContent>
+            <TabsContent value="gaps">
+              <TabGate
+                tab="gaps" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+                rowCount={bundle.intervals.length} emptyMessage="No gap data available for this race."
+              >
+                <GapsTab
+                  bundle={bundle}
+                  refDriver={refDriver}
+                  rivalDriver={rivalDriver}
+                  setRefDriver={setRefDriver}
+                  setRivalDriver={setRivalDriver}
+                  chartHeight={chartHeight}
+                />
+              </TabGate>
+            </TabsContent>
+            <TabsContent value="strategy">
+              <TabGate
+                tab="strategy" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+                rowCount={strategies.length} emptyMessage="No strategy data available for this race."
+              >
+                <StrategyTab strategies={strategies} res={res} onExpand={ensureDetail} onRetryDetail={ensureDetail} />
+              </TabGate>
+            </TabsContent>
+            <TabsContent value="pit">
+              <TabGate
+                tab="pit" res={res} chartHeight={chartHeight} onRetry={retryKeys}
+                rowCount={strategies.length} emptyMessage="No pit stop data available for this race."
+              >
+                <PitTab strategies={strategies} />
+              </TabGate>
+            </TabsContent>
+          </>
+        )}
       </Tabs>
     </div>
   );
@@ -421,8 +516,29 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
   refDriver: number | null; setRefDriver: (n: number | null) => void;
   chartHeight: number;
 }) => {
-  const laps = refDriver != null ? driverLapsForSectors(bundle, refDriver) : [];
-  const fastestLap = strategies.find((s) => s.driver.driver_number === refDriver)?.fastestLap ?? null;
+  // PF-02: derive once per (bundle, refDriver) — an inline rebuild gives the
+  // chart a new data reference every parent re-render and restarts its tweens.
+  const laps = useMemo(
+    () => (refDriver != null ? driverLapsForSectors(bundle, refDriver) : []),
+    [bundle, refDriver],
+  );
+  const refStrategy = strategies.find((s) => s.driver.driver_number === refDriver);
+  const fastestLap = refStrategy?.fastestLap ?? null;
+  const refDriverName = bundle.drivers.find((d) => d.driver_number === refDriver);
+  // UX-05: drop Lap Area — sectors share 15–45s range; lap ~95s flattens them.
+  // ponytail: delta-vs-best line (per-lap best sector diff) could restore the
+  // lap context without Y-axis conflict; upgrade path: add a toggle + second YAxis.
+  const srTable = useMemo(() => {
+    if (!laps.length) return null;
+    return buildSrTable(
+      laps.map((l) => String(l.lap_number)),
+      [
+        { name: "Sector 1", data: laps.map((l) => l.s1 ?? NaN) },
+        { name: "Sector 2", data: laps.map((l) => l.s2 ?? NaN) },
+        { name: "Sector 3", data: laps.map((l) => l.s3 ?? NaN) },
+      ],
+    );
+  }, [laps]);
   return (
     <section className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between sm:space-x-4">
@@ -435,7 +551,7 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
               value={refDriver != null ? String(refDriver) : undefined}
               onValueChange={(v) => setRefDriver(v ? +v : null)}
             >
-              <SelectTrigger className="w-[200px] sm:w-auto">
+              <SelectTrigger className="w-[200px] sm:w-auto" aria-label="Driver">
                 <SelectValue placeholder="—" />
               </SelectTrigger>
               <SelectContent>
@@ -448,21 +564,24 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
             </Select>
           )}
         </div>
-        {fastestLap != null && (
+        {fastestLap != null && refDriverName && (
           <div className="text-muted-foreground text-sm self-end sm:self-start">
-            Fastest lap {fmtLapTime(fastestLap)}
+            {nameOfDriver(refDriverName)} fastest lap {fmtLapTime(fastestLap)}
           </div>
         )}
       </div>
       <ChartCard
         title="Sector Times"
         height={chartHeight}
-        srSummary="Area chart of total lap time with line series for sector 1, sector 2 and sector 3 times on each lap."
+        srSummary="Line chart of sector 1, sector 2 and sector 3 times on each lap (lap total removed so sector variation is readable)."
+        srTable={srTable}
       >
         <ComposedChart data={laps}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-          <XAxis dataKey="lap_number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
-          <YAxis tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" unit="s" domain={["auto", "auto"]} />
+          <XAxis dataKey="lap_number" tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
+          {/* auto↔auto pins the axis to the sector data range (29–32 s) —
+              the default 0-based domain swallows the deltas again */}
+          <YAxis tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" unit="s" domain={["auto", "auto"]} />
           <Tooltip
             contentStyle={chartTooltip.contentStyle}
             labelStyle={chartTooltip.labelStyle}
@@ -470,11 +589,10 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
             cursor={chartTooltip.cursor}
             formatter={(v) => (typeof v === "number" ? `${v.toFixed(3)}s` : "—")}
           />
-          <Area dataKey="total" name="Lap" fill="var(--chart-4)33" stroke="var(--chart-4)" />
           <Line dataKey="s1" name="Sector 1" dot={false} strokeWidth={1.5} stroke="var(--chart-5)" />
           <Line dataKey="s2" name="Sector 2" dot={false} strokeWidth={1.5} stroke="var(--chart-2)" />
           <Line dataKey="s3" name="Sector 3" dot={false} strokeWidth={1.5} stroke="var(--chart-1)" />
-          <Legend wrapperStyle={{ fontSize: 11 }} />
+          <Legend wrapperStyle={{ fontSize: 11 }} formatter={legendText} />
         </ComposedChart>
       </ChartCard>
     </section>
@@ -484,68 +602,42 @@ const PaceTab = ({ bundle, strategies, refDriver, setRefDriver, chartHeight }: {
 // ---- Gaps: interval trace for a driver (gap to car ahead) ----
 // gap is numeric seconds for "time" intervals only — lapped/leader → null so
 // Recharts breaks the line instead of plotting a fabricated axis number.
-type GapPoint = {
-  ms: number; t: string;
-  gap: number | null; gapLabel: string;
-  rivalGap: number | null; rivalGapLabel: string;
-};
+// The spine itself lives in data/race.ts (gapSeries) so it stays benchable.
 
 const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver, chartHeight }: {
   bundle: RaceBundle; refDriver: number | null; rivalDriver: number | null;
   setRefDriver: (n: number | null) => void; setRivalDriver: (n: number | null) => void;
   chartHeight: number;
 }) => {
-  const series = useMemo(() => {
-    if (refDriver == null) return [];
-    const raw = bundle.intervals
-      .filter((i) => i.driver_number === refDriver)
-      .map((i) => ({ date: i.date, v: parseInterval(i.interval) }))
-      // drop only "none" — lapped/leader stay in the spine as line gaps
-      .filter((x) => x.v.type !== "none")
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const step = Math.max(1, Math.ceil(raw.length / 150));
-    return raw.filter((_, i) => i % step === 0).map((x) => ({
-      ms: new Date(x.date).getTime(),
-      t: new Date(x.date).toLocaleTimeString([], { hour12: false }),
-      gap: x.v.type === "time" ? x.v.seconds : null, // lapped/leader → null → line gap
-      gapLabel: fmtInterval(x.v),
-    }));
-  }, [bundle, refDriver]);
+  // PF-12: memoize on the intervals DATA REF, not `bundle` — `bundle` gets a
+  // new identity on every res patch (any tab loading), which re-ran all three
+  // derivations on an unrelated fetch. `intervals` only changes when its own
+  // resource resolves.
+  const intervals = bundle.intervals;
+
+  const series = useMemo(() => gapSeries(intervals, refDriver), [intervals, refDriver]);
 
   // Rival series — same downsample stride; empty when unselected or identical
   // to refDriver (stale state → render one line, not a duplicate).
-  const rivalSeries = useMemo(() => {
-    if (rivalDriver == null || rivalDriver === refDriver) return [];
-    const raw = bundle.intervals
-      .filter((i) => i.driver_number === rivalDriver)
-      .map((i) => ({ date: i.date, v: parseInterval(i.interval) }))
-      .filter((x) => x.v.type !== "none")
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const step = Math.max(1, Math.ceil(raw.length / 150));
-    return raw.filter((_, i) => i % step === 0).map((x) => ({
-      ms: new Date(x.date).getTime(),
-      t: new Date(x.date).toLocaleTimeString([], { hour12: false }),
-      gap: x.v.type === "time" ? x.v.seconds : null,
-      gapLabel: fmtInterval(x.v),
-    }));
-  }, [bundle, rivalDriver, refDriver]);
+  const rivalSeries = useMemo(
+    () => (rivalDriver === refDriver ? [] : gapSeries(intervals, rivalDriver)),
+    [intervals, rivalDriver, refDriver],
+  );
 
   // lapped intervals on the FULL spine (before downsample) — powers the note
   // below the chart so +N LAP values are stated even when stride drops points.
   const lapped = useMemo(() => {
     if (refDriver == null) return { count: 0, labels: [] as string[] };
-    const vals = bundle.intervals
+    const vals = intervals
       .filter((i) => i.driver_number === refDriver)
       .map((i) => parseInterval(i.interval))
       .filter((v) => v.type === "lapped");
     return { count: vals.length, labels: [...new Set(vals.map(fmtInterval))] };
-  }, [bundle, refDriver]);
+  }, [intervals, refDriver]);
 
   // Union both spines by timestamp; missing side = null (Recharts skips nulls).
   const chartData = useMemo<GapPoint[]>(() => {
-    if (rivalSeries.length === 0) {
-      return series.map((p) => ({ ...p, rivalGap: null, rivalGapLabel: "" }));
-    }
+    if (rivalSeries.length === 0) return series; // gapSeries already ships null rival fields
     const byMs = new Map<number, GapPoint>();
     for (const p of series) byMs.set(p.ms, { ...p, rivalGap: null, rivalGapLabel: "" });
     for (const p of rivalSeries) {
@@ -563,6 +655,17 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
   const showRival = rivalSeries.length > 0 && rivalDriver !== refDriver;
   const rivalMissing = rivalDriver != null && rivalDriver !== refDriver && rivalSeries.length === 0;
 
+  // A2: SR table — capped at 100 points (srTableModel) so a 150-point
+  // downsampled spine never becomes a 150-column screen-reader table.
+  const srTable = useMemo(() => {
+    if (!chartData.length) return null;
+    const series: { name: string; data: (number | null)[] }[] = [
+      { name: refName, data: chartData.map((p) => p.gap) },
+    ];
+    if (showRival) series.push({ name: rivalName, data: chartData.map((p) => p.rivalGap) });
+    return buildSrTable(chartData.map((p) => p.t), series);
+  }, [chartData, showRival, refName, rivalName]);
+
   return (
     <section className="space-y-4">
       {bundle.drivers.length === 0 ? (
@@ -575,7 +678,7 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
               value={refDriver != null ? String(refDriver) : undefined}
               onValueChange={(v) => setRefDriver(v ? +v : null)}
             >
-              <SelectTrigger className="w-[200px] sm:w-auto">
+              <SelectTrigger className="w-[200px] sm:w-auto" aria-label="Driver">
                 <SelectValue placeholder="—" />
               </SelectTrigger>
               <SelectContent>
@@ -593,7 +696,7 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
               value={rivalDriver != null ? String(rivalDriver) : undefined}
               onValueChange={(v) => setRivalDriver(v ? +v : null)}
             >
-              <SelectTrigger className="w-[200px] sm:w-auto">
+              <SelectTrigger className="w-[200px] sm:w-auto" aria-label="Compare driver">
                 <SelectValue placeholder="—" />
               </SelectTrigger>
               <SelectContent>
@@ -610,16 +713,22 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
           </div>
         </div>
       )}
-      <p className="muted small">Gap to the car ahead (intervals). Negative = behind / being lapped.</p>
+      {/* UX-08: both signs defined — parseInterval seconds: + = trailing car
+          ahead, − = ahead of the reference car; Leader/+N LAP/none = line gaps */}
+      <p className="text-xs text-muted-foreground">
+        Gap to the car ahead (intervals): + = behind the car ahead, − = ahead of it.
+        &quot;Leader&quot; / &quot;+N LAP&quot; / blank render as line gaps.
+      </p>
       <ChartCard
         title="Gap to Car Ahead"
         height={chartHeight}
         srSummary="Line chart of the time gap to the car ahead on each lap, with an optional second line for a comparison driver."
+        srTable={srTable}
       >
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-          <XAxis dataKey="t" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" minTickGap={60} />
-          <YAxis tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+          <XAxis dataKey="t" tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" minTickGap={60} />
+          <YAxis tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
           <Tooltip
             contentStyle={chartTooltip.contentStyle}
             labelStyle={chartTooltip.labelStyle}
@@ -633,7 +742,7 @@ const GapsTab = ({ bundle, refDriver, rivalDriver, setRefDriver, setRivalDriver,
           {showRival && (
             <Line dataKey="rivalGap" name={rivalName} dot={false} strokeWidth={1.5} stroke="var(--chart-1)" />
           )}
-          <Legend wrapperStyle={{ fontSize: 11 }} />
+          <Legend wrapperStyle={{ fontSize: 11 }} formatter={legendText} />
         </LineChart>
       </ChartCard>
       <p className="text-muted-foreground text-xs">
@@ -709,8 +818,14 @@ const StrategyTab = ({ strategies, res, onExpand, onRetryDetail }: {
                       arrow rides with the chip it introduces (no orphan/trailing →) */}
                   <div className="flex flex-wrap items-center gap-1.5">
                     {s.compounds.map((c, i) => {
-                      const bgColor = c === "SOFT" ? "var(--chart-1)" : c === "MEDIUM" ? "var(--chart-2)" : c === "HARD" ? "var(--chart-3)" : "var(--muted)";
-                      const textColor = c === "MEDIUM" ? "var(--foreground)" : "var(--card-foreground)";
+                      // A3: near-black labels on the bright compound fills
+                      // (light --foreground on yellow measured 1.33:1).
+                      const pill = c === "SOFT" ? TYRE_PILL_COLORS.SOFT
+                        : c === "MEDIUM" ? TYRE_PILL_COLORS.MEDIUM
+                        : c === "HARD" ? TYRE_PILL_COLORS.HARD
+                        : null;
+                      const bgColor = pill?.bg ?? "var(--muted)";
+                      const textColor = pill?.fg ?? "var(--card-foreground)";
                       return (
                         <span key={i} className="inline-flex items-center gap-1.5 text-xs">
                           {i > 0 && <span aria-hidden="true" className="text-muted-foreground">→</span>}
@@ -764,12 +879,41 @@ const StrategyTab = ({ strategies, res, onExpand, onRetryDetail }: {
 // ---- Pit: stop-time + overtakes leaderboard ----
 // empty (0 strategies) never reaches here: TabGate renders the empty message.
 const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategies> }) => {
-  const pitRows = strategies
-    .filter((s) => s.avgStopTime != null)
-    .sort((a, b) => (a.avgStopTime! - b.avgStopTime!));
-  const overtakeRows = strategies
-    .filter((s) => s.overtakesMade + s.overtakesLost > 0)
-    .sort((a, b) => b.overtakesMade - a.overtakesMade);
+  // PF-06: derive chart rows once per strategies — inline filter/map handed
+  // Recharts a fresh data array every render, restarting bar tweens on
+  // hover/resize of the parent (identical geometry, full animation churn).
+  const pitRows = useMemo(
+    () => strategies
+      .filter((s) => s.avgStopTime != null)
+      .sort((a, b) => a.avgStopTime! - b.avgStopTime!)
+      .map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! })),
+    [strategies],
+  );
+  const overtakeRows = useMemo(
+    () => strategies
+      .filter((s) => s.overtakesMade + s.overtakesLost > 0)
+      .sort((a, b) => b.overtakesMade - a.overtakesMade)
+      .map((s) => ({ name: nameOfDriver(s.driver), made: s.overtakesMade, lost: s.overtakesLost })),
+    [strategies],
+  );
+  // A2: SR tables for both bar charts (driver names + values)
+  const pitSrTable = useMemo(
+    () => buildSrTable(
+      pitRows.map((r) => r.name),
+      [{ name: "Avg stationary (s)", data: pitRows.map((r) => r.avg) }],
+    ),
+    [pitRows],
+  );
+  const overtakeSrTable = useMemo(
+    () => buildSrTable(
+      overtakeRows.map((r) => r.name),
+      [
+        { name: "Made", data: overtakeRows.map((r) => r.made) },
+        { name: "Lost", data: overtakeRows.map((r) => r.lost) },
+      ],
+    ),
+    [overtakeRows],
+  );
 
   return (
     <Card className="w-full">
@@ -779,11 +923,12 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
             title="Pit Stop Times (stationary, avg)"
             height={260}
             srSummary="Horizontal bar chart of each driver's average stationary pit stop time in seconds — car stopped in the box, not total pit-lane time."
+            srTable={pitSrTable}
           >
-            <BarChart data={pitRows.map((s) => ({ name: nameOfDriver(s.driver), avg: s.avgStopTime! }))} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
+            <BarChart data={pitRows} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
-              <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+              <XAxis type="number" tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
+              <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
               <Tooltip
                 contentStyle={chartTooltip.contentStyle}
                 labelStyle={chartTooltip.labelStyle}
@@ -800,11 +945,12 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
             title="Overtakes Made"
             height={260}
             srSummary="Bar chart comparing overtakes made and overtakes lost for each driver."
+            srTable={overtakeSrTable}
           >
-            <BarChart data={overtakeRows.map((s) => ({ name: nameOfDriver(s.driver), made: s.overtakesMade, lost: s.overtakesLost }))} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
+            <BarChart data={overtakeRows} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis type="number" tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
-              <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} stroke="var(--muted-foreground)" />
+              <XAxis type="number" tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
+              <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
               <Tooltip
                 contentStyle={chartTooltip.contentStyle}
                 labelStyle={chartTooltip.labelStyle}
@@ -813,6 +959,7 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
               />
               <Bar dataKey="made" fill="var(--chart-5)" name="Made" />
               <Bar dataKey="lost" fill="var(--chart-1)" name="Lost" />
+              <Legend wrapperStyle={{ fontSize: 11 }} formatter={legendText} />
             </BarChart>
           </ChartCard>
         </section>

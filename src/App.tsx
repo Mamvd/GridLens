@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, Suspense, lazy } from "react";
 import {
   BrowserRouter, Routes, Route, Navigate, Link,
   useParams, useLocation, useNavigate,
@@ -9,8 +9,6 @@ import {
   describeFailure, shouldAutoRetry, retryDelayMs,
   type MeetingsLoadState, type FailureKind,
 } from "./lib/meetings-state";
-import { Season } from "./views/Season";
-import { Race } from "./views/Race";
 import { meetingFor } from "./lib/slug";
 import { availableYears } from "./lib/years";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -18,6 +16,10 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+
+// PF-03: route-level splitting — Race and Season (owns Recharts) load on demand.
+const Race = lazy(() => import("./views/Race").then((m) => ({ default: m.Race })));
+const Season = lazy(() => import("./views/Season").then((m) => ({ default: m.Season })));
 
 const YEARS = availableYears();
 const DEFAULT_YEAR = 2026;
@@ -72,6 +74,9 @@ const RouteSkeleton = () => (
       <Skeleton className="h-4 w-48" />
       <Skeleton className="h-3 w-64" />
       <Skeleton className="h-9 w-full max-w-[360px]" />
+      <div role="status" className="text-xs text-muted-foreground" aria-live="polite">
+        Loading calendar&hellip;
+      </div>
     </CardContent>
   </Card>
 );
@@ -96,16 +101,18 @@ const SeasonRoute = ({ state, onRetry }: { state: MeetingsLoadState; onRetry: ()
 
 const RaceRedirect = () => {
   const { year, slug } = useParams();
-  return <Navigate to={`/race/${year}/${slug}/pace`} replace />;
+  const { search } = useLocation(); // UX-02: keep ?driver=&compare= across the tab redirect
+  return <Navigate to={`/race/${year}/${slug}/pace${search}`} replace />;
 };
 
 const RaceRoute = ({ state, onRetry }: { state: MeetingsLoadState; onRetry: () => void }) => {
   const { year, slug, tab } = useParams();
+  const { search } = useLocation(); // UX-02: query survives the invalid-tab redirect
   if (!year || !YEARS.includes(Number(year))) {
     return <Navigate to={`/season/${DEFAULT_YEAR}`} replace />;
   }
   if (!TABS.includes(tab as (typeof TABS)[number])) {
-    return <Navigate to={`/race/${year}/${slug}/pace`} replace />;
+    return <Navigate to={`/race/${year}/${slug}/pace${search}`} replace />;
   }
   // meetings error → same card as Season route, not skeleton-forever / NotFound
   if (state.status === "error") return <MeetingsErrorCard kind={state.kind} onRetry={onRetry} />;
@@ -144,7 +151,7 @@ const Shell = () => {
       // as {stale: true}; reject means no cache → bounded auto-retry of opaque
       // network failures only, then the error state (clean card).
       const load = () => {
-        seasonMeetings(year)
+        seasonMeetings(year, { signal: controller.signal })
           .then((res) => {
             if (!alive) return;
             setState((prev) => resolveMeetingsState(prev, {
@@ -212,6 +219,15 @@ const Shell = () => {
   return (
     <div className="dark min-h-screen bg-background text-foreground flex flex-col">
       <header className="sticky top-0 z-10 border-b bg-card/80 backdrop-blur supports-[backdrop-filter]:bg-card/80">
+        {/* A7: first focusable element in the shell — invisible until focused,
+            Enter jumps past the header chrome to #main (tabIndex -1 makes the
+            non-focusable <main> actually take focus). */}
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:border focus:border-primary focus:bg-card focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          Skip to main content
+        </a>
         <div className="mx-auto flex max-w-[1100px] items-center gap-3 px-5 py-3">
           <h1 className="text-[17px] font-semibold tracking-tight">GridLens</h1>
           <span className="text-xs text-muted-foreground">F1 Season & Race Explorer</span>
@@ -219,7 +235,7 @@ const Shell = () => {
           <div className="ml-auto flex items-center gap-2">
             <span className="text-xs text-muted-foreground hidden sm:inline">Season</span>
             <Select value={String(year ?? DEFAULT_YEAR)} onValueChange={(v) => navigate(`/season/${v}`)}>
-              <SelectTrigger className="w-[110px]"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-[110px]" aria-label="Season"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {YEARS.map((y) => <SelectItem key={y} value={String(y)}>{y}</SelectItem>)}
               </SelectContent>
@@ -227,17 +243,19 @@ const Shell = () => {
           </div>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-[1100px] flex-1 px-5 py-5">
-        <Routes>
-          <Route path="/" element={<Navigate to={`/season/${DEFAULT_YEAR}`} replace />} />
-          <Route path="/season/:year" element={<SeasonRoute state={state} onRetry={() => setReloadKey((k) => k + 1)} />} />
-          <Route path="/race/:year/:slug" element={<RaceRedirect />} />
-          <Route
-            path="/race/:year/:slug/:tab"
-            element={<RaceRoute state={state} onRetry={() => setReloadKey((k) => k + 1)} />}
-          />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+      <main id="main" tabIndex={-1} className="mx-auto w-full max-w-[1100px] flex-1 px-5 py-5">
+        <Suspense fallback={<RouteSkeleton />}>
+          <Routes>
+            <Route path="/" element={<Navigate to={`/season/${DEFAULT_YEAR}`} replace />} />
+            <Route path="/season/:year" element={<SeasonRoute state={state} onRetry={() => setReloadKey((k) => k + 1)} />} />
+            <Route path="/race/:year/:slug" element={<RaceRedirect />} />
+            <Route
+              path="/race/:year/:slug/:tab"
+              element={<RaceRoute state={state} onRetry={() => setReloadKey((k) => k + 1)} />}
+            />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   );

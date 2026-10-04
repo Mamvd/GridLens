@@ -4,6 +4,11 @@
 
 export type ChartRange = "top5" | "top10" | "all";
 
+// PF-05: raw keystrokes only hit chart-select after typing pauses — a live
+// filter re-runs chartSelect + rebuilds the LineChart visible set on every
+// keystroke (measured 67–152 ms/frame vs 4–34 ms baseline).
+export const SEARCH_DEBOUNCE_MS = 150;
+
 export const rangeLimit = (range: ChartRange): number =>
   range === "top5" ? 5 : range === "top10" ? 10 : Number.POSITIVE_INFINITY;
 
@@ -141,4 +146,54 @@ export const ensureVisible = (hex: string): string | null => {
     }
   }
   return "#ffffff";
+};
+
+// A4: Recharts paints legend TEXT in the series colour (DefaultLegendContent
+// sets `color = entry.color`), so the brand red #ed1c24 lands on the card
+// (#121214) at 4.27:1 — under the 4.5:1 floor for 11–12 px text. Strokes,
+// dots and legend swatches keep the brand hue; ONLY the legend text is lifted
+// to a same-hue tint that clears the floor.
+export const CARD_BG = "#121214";
+// #ff4b52 = 5.68:1 on --card (≥4.5:1); nearest lighter tint of #ed1c24 checked.
+export const LEGEND_RED_INK = "#ff4b52";
+
+// entry.color arrives as the CSS source we passed to stroke/fill — either
+// `var(--chart-1)` or the raw hex — so both spellings map to the tint.
+export const legendInk = (stroke: string): string => {
+  const s = stroke.trim().toLowerCase();
+  return s === "var(--chart-1)" || s === "#ed1c24" ? LEGEND_RED_INK : stroke;
+};
+
+// Championship tooltip rows (UX-01). Recharts hands the custom tooltip one
+// entry per <Line> (all series at the hovered index, not the nearest one);
+// render them all, deduped by name, in payload order.
+export interface ChampTipEntry {
+  name?: string | number;
+  value?: number | string | ReadonlyArray<number | string>;
+  color?: string;
+  payload?: unknown;
+}
+
+export interface ChampTipRow {
+  name: string;
+  value: number | string | ReadonlyArray<number | string> | undefined;
+  color: string | undefined;
+  race: string;
+}
+
+export const champTipRows = (payload: readonly ChampTipEntry[]): ChampTipRow[] => {
+  const seen = new Set<string>();
+  const rows: ChampTipRow[] = [];
+  for (const e of payload) {
+    const name = String(e.name ?? "");
+    if (seen.has(name)) continue; // Recharts quirk: shared index can repeat a series
+    seen.add(name);
+    rows.push({
+      name,
+      value: e.value,
+      color: typeof e.color === "string" ? e.color : undefined,
+      race: String((e.payload as { race?: string } | undefined)?.race ?? ""),
+    });
+  }
+  return rows;
 };

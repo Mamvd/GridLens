@@ -11,6 +11,7 @@ import {
 } from "./lib/meetings-state";
 import { meetingFor } from "./lib/slug";
 import { availableYears } from "./lib/years";
+import { Landing } from "./views/Landing";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -24,6 +25,7 @@ const Season = lazy(() => import("./views/Season").then((m) => ({ default: m.Sea
 const YEARS = availableYears();
 const DEFAULT_YEAR = 2026;
 const TABS = ["pace", "gaps", "strategy", "pit"] as const;
+const FOCUS = "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 // year embedded in /season/:year and /race/:year/… — null when absent or not selectable
 const yearFromPath = (pathname: string): number | null => {
@@ -131,6 +133,11 @@ const Shell = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const year = yearFromPath(location.pathname);
+  // Landing renders with zero OpenF1 traffic. The boolean (not raw pathname)
+  // is the effect dep: it flips on `/` ↔ season so `/` → `/season/:year`
+  // triggers the load, while season → race keeps today's behavior (raw
+  // pathname there would restart the state machine and abort/reload).
+  const onLanding = location.pathname === "/";
   // #9: single state machine — API-down ≠ empty season. stale=true means the
   // list came from cache after a failed fetch (seasonMeetings' stale-if-error).
   const [state, setState] = useState<MeetingsLoadState>(initialMeetingsState);
@@ -141,6 +148,7 @@ const Shell = () => {
   useEffect(() => { stateRef.current = state; }, [state]);
 
   useEffect(() => {
+    if (onLanding) return; // REQ: zero api.openf1.org requests while on `/`
     let alive = true;
     const controller = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -192,28 +200,50 @@ const Shell = () => {
       if (retryTimer !== undefined) clearTimeout(retryTimer);
       window.removeEventListener("online", onOnline);
     };
-  }, [year, reloadKey]);
+  }, [onLanding, year, reloadKey]);
 
-  // one document.title effect for every route
+  // one metadata effect for every route: document.title (unchanged outcomes
+  // for season/race) + per-route meta[name=description] + link[rel=canonical]
+  // (origin + pathname — index.html's static "/" canonical is corrected on mount)
   useEffect(() => {
     const meetings = state.status === "success" ? state.meetings : [];
     const loadedYear = state.status === "success" ? state.year : null;
-    const season = location.pathname.match(/^\/season\/(\d{4})/);
+    const path = location.pathname;
+    const APP_DESC =
+      "GridLens — F1 season and race explorer. OpenF1-based dashboards for championship standings, tyre strategy, lap pace and pit stops, 2023 onward.";
+    const apply = (title: string, description: string) => {
+      document.title = title;
+      document.querySelector('meta[name="description"]')?.setAttribute("content", description);
+      document
+        .querySelector('link[rel="canonical"]')
+        ?.setAttribute("href", `${window.location.origin}${path}`);
+    };
+    const season = path.match(/^\/season\/(\d{4})/);
     if (season) {
-      document.title = `GridLens — ${season[1]} Season`;
+      apply(
+        `GridLens — ${season[1]} Season`,
+        `GridLens — the ${season[1]} F1 season: calendar, championship standings, tyre strategy, lap pace, gaps and pit stops.`,
+      );
       return;
     }
-    const race = location.pathname.match(/^\/race\/(\d{4})\/([^/]+)(?:\/([^/]+))?/);
+    const race = path.match(/^\/race\/(\d{4})\/([^/]+)(?:\/([^/]+))?/);
     if (race) {
       const meeting = meetingFor(meetings, race[2]);
       const tabLabel = (race[3] ?? "pace").replace(/^./, (c) => c.toUpperCase());
-      if (meeting) document.title = `GridLens — ${meeting.meeting_name} (${tabLabel})`;
-      else document.title = loadedYear === Number(race[1]) ? "GridLens — Not found" : "GridLens";
+      const title = meeting
+        ? `GridLens — ${meeting.meeting_name} (${tabLabel})`
+        : loadedYear === Number(race[1]) ? "GridLens — Not found" : "GridLens";
+      apply(title, APP_DESC);
       return;
     }
-    document.title = location.pathname === "/"
-      ? `GridLens — ${DEFAULT_YEAR} Season`
-      : "GridLens — Not found";
+    if (path === "/") {
+      apply(
+        "GridLens — F1 Season & Race Explorer",
+        "GridLens — free F1 season and race explorer built on OpenF1 data: championship standings, calendar, tyre strategy, lap pace, gaps and pit stops, seasons 2023 onward.",
+      );
+      return;
+    }
+    apply("GridLens — Not found", APP_DESC);
   }, [location.pathname, state]);
 
   return (
@@ -229,7 +259,14 @@ const Shell = () => {
           Skip to main content
         </a>
         <div className="mx-auto flex max-w-[1100px] items-center gap-3 px-5 py-3">
-          <h1 className="text-[17px] font-semibold tracking-tight">GridLens</h1>
+          {/* brand → home; heading only off the landing page (hero owns h1 on /) */}
+          <Link to="/" className={`rounded-sm ${FOCUS}`}>
+            {onLanding ? (
+              <span className="text-[17px] font-semibold tracking-tight">GridLens</span>
+            ) : (
+              <h1 className="text-[17px] font-semibold tracking-tight">GridLens</h1>
+            )}
+          </Link>
           <span className="text-xs text-muted-foreground">F1 Season & Race Explorer</span>
           <Badge variant="secondary" className="ml-1 hidden sm:inline">{year ?? DEFAULT_YEAR}</Badge>
           <div className="ml-auto flex items-center gap-2">
@@ -246,7 +283,7 @@ const Shell = () => {
       <main id="main" tabIndex={-1} className="mx-auto w-full max-w-[1100px] flex-1 px-5 py-5">
         <Suspense fallback={<RouteSkeleton />}>
           <Routes>
-            <Route path="/" element={<Navigate to={`/season/${DEFAULT_YEAR}`} replace />} />
+            <Route path="/" element={<Landing />} />
             <Route path="/season/:year" element={<SeasonRoute state={state} onRetry={() => setReloadKey((k) => k + 1)} />} />
             <Route path="/race/:year/:slug" element={<RaceRedirect />} />
             <Route

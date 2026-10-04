@@ -161,9 +161,10 @@ const main = async () => {
       const page = await ctx.newPage();
 
       await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
-      try { await page.waitForURL((u) => u.pathname === "/season/2026", { timeout: 10000 }); } catch { /* below */ }
-      if (urlPath(page) === "/season/2026") pass("3a. / redirects to /season/2026 (App DEFAULT_YEAR)");
-      else fail("3a. / redirects to /season/2026 (App DEFAULT_YEAR)", urlPath(page));
+      // `/` is now the Landing page (no redirect) — season is reached via its CTA (9b)
+      const landed = await waitText(page, "built on OpenF1 data", 10000);
+      if (urlPath(page) === "/" && landed) pass("3a. / renders Landing (no redirect)");
+      else fail("3a. / renders Landing (no redirect)", `${urlPath(page)} landed=${landed}`);
 
       await page.goto(`${origin}/bogus`, { waitUntil: "domcontentloaded" });
       if (await waitText(page, "Not found")) pass("3b. /bogus shows Not found");
@@ -379,6 +380,59 @@ const main = async () => {
         else fail("8k. range click → URL → reload keeps range=top5", `legend=${rc}`);
       }
 
+      await ctx.close();
+    }
+
+    // 9. landing page: zero API traffic, single h1, CTA → season, Back → landing
+    {
+      const ctx = await browser.newContext();
+      await installFixtures(ctx);
+      const page = await ctx.newPage();
+      let apiHits = 0;
+      const issues = [];
+      page.on("request", (r) => { if (r.url().includes("api.openf1.org")) apiHits++; });
+      page.on("pageerror", (err) => issues.push(String(err?.message ?? err)));
+      page.on("console", (msg) => { if (msg.type() === "error") issues.push(msg.text()); });
+
+      await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+      const heroOk = await waitText(page, "built on OpenF1 data", 10000);
+      await sleep(800); // give an eager fetch time to appear in the counter
+      const h1c = await page.locator("h1").count();
+      if (heroOk && apiHits === 0 && h1c === 1) {
+        pass("9a. landing hero + 0 openf1 requests + exactly one h1", `hits=${apiHits} h1=${h1c}`);
+      } else {
+        fail("9a. landing hero + 0 openf1 requests + exactly one h1", `hero=${heroOk} hits=${apiHits} h1=${h1c}`);
+      }
+
+      // primary CTA → first available year (2026) → Season renders
+      await page.getByRole("link", { name: /Explore 2026 season/ }).click();
+      let ctaOk = false;
+      try { await page.waitForURL((u) => u.pathname === "/season/2026", { timeout: 10000 }); ctaOk = true; } catch { /* below */ }
+      const seasonOk = ctaOk && (await waitText(page, "No races found for 2026.", 20000));
+      if (seasonOk) pass("9b. primary CTA → /season/2026, Season renders");
+      else fail("9b. primary CTA → /season/2026, Season renders", `url=${urlPath(page)} cta=${ctaOk} season=${seasonOk}`);
+
+      // browser Back → landing, still no API traffic
+      const before = apiHits;
+      await page.goBack({ waitUntil: "domcontentloaded" });
+      const backOk = await waitText(page, "built on OpenF1 data", 10000);
+      await sleep(500);
+      if (backOk && urlPath(page) === "/" && apiHits === before) {
+        pass("9c. Back → landing visible, 0 new openf1 requests", `hits=${apiHits}`);
+      } else {
+        fail("9c. Back → landing visible, 0 new openf1 requests", `path=${urlPath(page)} back=${backOk} hits=${apiHits} (was ${before})`);
+      }
+
+      // direct deep link + refresh (fixtures YEAR=2024)
+      await page.goto(`${origin}/season/2024`, { waitUntil: "domcontentloaded" });
+      const deep1 = await waitText(page, "Bahrain Grand Prix", 20000);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      const deep2 = await waitText(page, "Bahrain Grand Prix", 20000);
+      if (deep1 && deep2) pass("9d. /season/2024 deep link + refresh");
+      else fail("9d. /season/2024 deep link + refresh", `load=${deep1} refresh=${deep2}`);
+
+      if (issues.length === 0) pass("9e. console clean on landing + season + back");
+      else fail("9e. console clean on landing + season + back", issues.slice(0, 5).join(" | "));
       await ctx.close();
     }
   } finally {

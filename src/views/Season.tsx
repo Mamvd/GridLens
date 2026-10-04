@@ -330,6 +330,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
   useEffect(() => {
     const chartDiv = chartRef.current;
     if (!chartDiv || !chartDiv.querySelector) return;
+    const rect = chartDiv.getBoundingClientRect(); // constant per effect run — hoist out of the driver×lap loops
     const points: Record<string, ReadonlyArray<{ x: number; y: number; race: string }>> = {};
     for (const name of sel.visible) {
       const path = chartDiv.querySelector<SVGPathElement>(`path.recharts-line-curve[stroke="${colourOf(name)}"]`);
@@ -341,7 +342,6 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
         const ctm = path.getScreenCTM();
         if (!ctm) continue;
         const screen = new DOMPoint(pt.x, pt.y).matrixTransform(ctm);
-        const rect = chartDiv.getBoundingClientRect();
         pts.push({
           x: screen.x - rect.left,
           y: screen.y - rect.top,
@@ -441,6 +441,7 @@ export const Season = ({ year, meetings, meetingsStale }: Props) => {
                         src={m.country_flag}
                         alt=""
                         width={24}
+                        height={24}
                         loading="lazy"
                         decoding="async"
                         className="h-auto w-6 shrink-0 rounded-[2px]"

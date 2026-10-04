@@ -944,7 +944,7 @@ const PitTab = ({ strategies }: { strategies: ReturnType<typeof computeStrategie
           <ChartCard
             title="Overtakes Made"
             height={260}
-            srSummary="Bar chart comparing overtakes made and overtakes lost for each driver."
+            srSummary="Bar chart comparing overtakes made and overtakes lost for each driver. Per the OpenF1 definition this includes on-track passes as well as position changes from pit stops or post-race penalties."
             srTable={overtakeSrTable}
           >
             <BarChart data={overtakeRows} layout="vertical" margin={{ top: 12, right: 16, bottom: 4, left: 4 }}>

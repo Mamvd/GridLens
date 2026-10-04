@@ -1,0 +1,31 @@
+# GridLens
+
+> GridLens is a free, browser-only Formula 1 season and race explorer. It renders
+> championship standings, tyre strategy, lap pace, interval gaps and pit stops
+> from OpenF1 data, covering every season the OpenF1 API holds (2023 onward).
+
+Static single-page app. No account, no backend, no tracking. The browser calls
+the OpenF1 REST API directly and caches cheap responses in localStorage.
+
+## Data source
+
+All motorsport data comes from [OpenF1](https://openf1.org/) (https://api.openf1.org).
+GridLens does not operate the data source and is not affiliated with Formula 1,
+the FIA, or OpenF1. OpenF1 only serves data from 2023 onward.
+
+## Site structure
+
+- `/` — redirects to the current season
+- `/season/{year}` — season calendar, championship standings, points progression, strategy and pit charts (years 2023–2026)
+- `/race/{year}/{meeting-slug}/pace` — lap pace chart and sector detail
+- `/race/{year}/{meeting-slug}/gaps` — interval gaps between drivers
+- `/race/{year}/{meeting-slug}/strategy` — tyre stint/compound strategies
+- `/race/{year}/{meeting-slug}/pit` — pit stops, overtakes, starting grid
+
+Race URLs are deep-linkable; each tab loads only the OpenF1 resources it needs.
+
+## Notes for agents
+
+- Year floor is 2023: requests for earlier seasons return 404 from OpenF1.
+- Future (unrun) races have no data and are not linked.
+- Human-readable entry points: `/sitemap.xml`, `/robots.txt`.

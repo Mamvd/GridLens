@@ -5,6 +5,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="canonical" href="https://grid-lens-xi.vercel.app/" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="preconnect" href="https://api.openf1.org" crossorigin />
     <meta
       name="description"
       content="GridLens — F1 season and race explorer. OpenF1-based dashboards for championship standings, tyre strategy, lap pace and pit stops, 2023 onward."
@@ -16,15 +17,31 @@
       content="GridLens — F1 season and race explorer. OpenF1-based dashboards for championship standings, tyre strategy, lap pace and pit stops, 2023 onward."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image" content="https://grid-lens-xi.vercel.app/og-image.png" />
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content="GridLens — F1 Season & Race Explorer" />
     <meta
       name="twitter:description"
       content="GridLens — F1 season and race explorer. OpenF1-based dashboards for championship standings, tyre strategy, lap pace and pit stops, 2023 onward."
     />
-    <meta name="twitter:image" content="/og-image.png" />
+    <meta name="twitter:image" content="https://grid-lens-xi.vercel.app/og-image.png" />
     <title>GridLens — F1 Season & Race Explorer</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "GridLens",
+        "alternateName": "GridLens — F1 Season & Race Explorer",
+        "url": "https://grid-lens-xi.vercel.app/",
+        "applicationCategory": "DataApplication",
+        "operatingSystem": "Any modern web browser",
+        "browserRequires": "A modern JavaScript-enabled web browser",
+        "isAccessibleForFree": true,
+        "inLanguage": "en",
+        "description": "Free browser-only Formula 1 season and race explorer built on OpenF1 data: championship standings, calendar, tyre strategy, lap pace, interval gaps and pit stops, seasons 2023 onward.",
+        "isBasedOn": "https://openf1.org"
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

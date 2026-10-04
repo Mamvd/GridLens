@@ -1,2 +1,4 @@
 User-agent: *
 Allow: /
+
+Sitemap: https://grid-lens-xi.vercel.app/sitemap.xml

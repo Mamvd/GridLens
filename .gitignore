@@ -28,3 +28,6 @@ dist-ssr
 
 # Superpowers scratch
 .superpowers/
+
+# Audit report
+AUDIT.md
